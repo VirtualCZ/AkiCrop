@@ -1,0 +1,14 @@
+{
+	"name": "AkiCrop",
+	"short_name": "AkiCrop",
+	"description": "Client-side image border tool with aspect ratio presets",
+	"display": "standalone",
+	"start_url": "/",
+	"background_color": "#e8e8e8",
+	"theme_color": "#3b63fb",
+	"icons": [
+		{ "src": "/icons/icon-144.png", "sizes": "144x144", "type": "image/png", "purpose": "any" },
+		{ "src": "/icons/icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+		{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" }
+	]
+}

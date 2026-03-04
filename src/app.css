@@ -1,0 +1,39 @@
+/* AkiCrop – iPad-style theme */
+:root {
+	--adobe-blue: #3b63fb;
+	--sidebar-width: 320px;
+	--mode-strip-width: 56px;
+	--topbar-height: 52px;
+	--zoombar-height: 40px;
+	--bg-app: #1e1e1e;
+	--bg-panel: #1e1e1e;
+	--bg-elevated: #2a2a2a;
+	--bg-input: #2a2a2a;
+	--border-subtle: rgba(255, 255, 255, 0.08);
+	--text-primary: #c7c7c7;
+	--text-secondary: #8a8a8a;
+	--font-sans: 'Source Sans 3', -apple-system, BlinkMacSystemFont, sans-serif;
+	--font-size-ui: 14px;
+	--font-size-label: 12px;
+	--font-size-title: 16px;
+	--radius: 6px;
+	--touch-min: 44px;
+	/* Slider: left of handle = light, right of handle = dark (two solid segments) */
+	--track-light: #a2a2a2;
+	--track-dark: #393939;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html, body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+	font-family: var(--font-sans);
+	font-size: var(--font-size-ui);
+	color: var(--text-primary);
+	background: var(--bg-app);
+	-webkit-tap-highlight-color: transparent;
+}

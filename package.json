@@ -1,0 +1,31 @@
+{
+	"name": "akicrop",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"dev:https": "cross-env VITE_HTTPS=true vite dev",
+		"dev:host": "vite dev --host",
+		"dev:https:host": "cross-env VITE_HTTPS=true vite dev --host",
+		"build": "vite build",
+		"preview": "vite preview",
+		"generate-icons": "node scripts/generate-icons.cjs",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+	},
+	"devDependencies": {
+		"@vitejs/plugin-basic-ssl": "^2.0.1",
+		"cross-env": "^7.0.3",
+		"@sveltejs/adapter-auto": "^7.0.0",
+		"@sveltejs/adapter-static": "^3.0.10",
+		"@sveltejs/kit": "^2.50.2",
+		"@sveltejs/vite-plugin-svelte": "^6.2.4",
+		"pngjs": "^7.0.0",
+		"svelte": "^5.51.0",
+		"svelte-check": "^4.4.2",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.1"
+	}
+}
