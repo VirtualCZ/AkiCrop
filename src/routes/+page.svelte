@@ -11,7 +11,11 @@
 	type AppMode = 'crop' | 'carousel';
 
 	// Mode from URL only. Toggle is real <a> links so navigation updates $page and the UI.
-	const appMode = $derived(($page.url.searchParams.get('mode') === 'carousel' ? 'carousel' : 'crop') as AppMode);
+	// Avoid url.searchParams during prerender (static build) — not available then
+	const appMode = $derived.by(() => {
+		if (typeof window === 'undefined') return 'crop' as AppMode;
+		return ($page.url.searchParams.get('mode') === 'carousel' ? 'carousel' : 'crop') as AppMode;
+	});
 
 	let canvasEl = $state<HTMLCanvasElement | null>(null);
 	let canvasWrapEl = $state<HTMLDivElement | null>(null);
