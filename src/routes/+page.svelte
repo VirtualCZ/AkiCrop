@@ -39,6 +39,8 @@
 	let originalWidth = $state(0);
 	let originalHeight = $state(0);
 	let selectedTemplateId = $state<TemplateId>('1:1');
+	let customRatioW = $state(16);
+	let customRatioH = $state(9);
 	let borderType = $state<BorderType>('solid');
 	let padding = $state(0);
 	let blurStrength = $state(25);
@@ -65,7 +67,16 @@
 	let carouselNarrowImageWarning = $state(false); // image not wide enough for carousel
 
 	const template = $derived(TEMPLATES.find((t) => t.id === selectedTemplateId)!);
-	const templateRatio = $derived(template.id === 'original' ? 0 : template.ratio);
+	const templateRatio = $derived.by(() => {
+		const t = template;
+		if (t.id === 'original') return 0;
+		if (t.id === 'custom') {
+			const w = Math.max(0.1, customRatioW);
+			const h = Math.max(0.1, customRatioH);
+			return w / h;
+		}
+		return t.ratio;
+	});
 
 	// Carousel: auto = one fewer panel than "full fit"; user can pick 2..auto (no single panel, no more than auto)
 	const carouselPanelCountAuto = $derived.by(() => {
@@ -983,6 +994,33 @@
 								</button>
 							{/each}
 						</div>
+						{#if selectedTemplateId === 'custom'}
+							<div class="custom-ratio-row">
+								<label class="custom-ratio-label">
+									<span>Width</span>
+									<input
+										type="number"
+										class="custom-ratio-input"
+										min="0.1"
+										step="0.1"
+										bind:value={customRatioW}
+										aria-label="Aspect width"
+									/>
+								</label>
+								<span class="custom-ratio-sep">∶</span>
+								<label class="custom-ratio-label">
+									<span>Height</span>
+									<input
+										type="number"
+										class="custom-ratio-input"
+										min="0.1"
+										step="0.1"
+										bind:value={customRatioH}
+										aria-label="Aspect height"
+									/>
+								</label>
+							</div>
+						{/if}
 					</section>
 				{:else}
 					<section class="control-group">
@@ -1801,6 +1839,37 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
+	}
+
+	.custom-ratio-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+	.custom-ratio-label {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--font-size-ui);
+		color: var(--text-secondary);
+	}
+	.custom-ratio-label span {
+		min-width: 2.5em;
+	}
+	.custom-ratio-input {
+		width: 64px;
+		min-height: 36px;
+		padding: 6px 10px;
+		border-radius: var(--radius);
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-input);
+		color: var(--text);
+		font-size: var(--font-size-ui);
+	}
+	.custom-ratio-sep {
+		color: var(--text-secondary);
+		font-weight: 600;
 	}
 
 	.sidebar-btn {

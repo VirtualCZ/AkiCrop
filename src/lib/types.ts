@@ -2,12 +2,12 @@
  * AkiCrop – TypeScript types for template presets, border options, and render state.
  */
 
-export type TemplateId = '1:1' | '4:5' | '9:16' | '16:9' | 'original';
+export type TemplateId = '1:1' | '4:5' | '9:16' | '16:9' | '1.91:1' | 'original' | 'custom';
 
 export interface Template {
 	id: TemplateId;
 	label: string;
-	ratio: number; // width / height
+	ratio: number; // width / height (0 = use image aspect; custom uses state)
 }
 
 export type BorderType = 'solid' | 'blur' | 'auto';
@@ -41,9 +41,11 @@ export interface RenderOptions {
 }
 
 export const TEMPLATES: Template[] = [
-	{ id: '1:1', label: 'Instagram Square', ratio: 1 },
-	{ id: '4:5', label: 'Instagram Portrait', ratio: 4 / 5 },
-	{ id: '9:16', label: 'Instagram Story', ratio: 9 / 16 },
-	{ id: '16:9', label: '16:9', ratio: 16 / 9 },
-	{ id: 'original', label: 'Original', ratio: 0 } // 0 means use image aspect
+	{ id: '1:1', label: 'Square', ratio: 1 },
+	{ id: '4:5', label: 'Portrait (4:5)', ratio: 4 / 5 },
+	{ id: '9:16', label: 'Story (9:16)', ratio: 9 / 16 },
+	{ id: '16:9', label: 'Landscape (16:9)', ratio: 16 / 9 },
+	{ id: '1.91:1', label: 'Wide (1.91:1)', ratio: 1.91 }, // Instagram landscape post
+	{ id: 'original', label: 'Original', ratio: 0 },
+	{ id: 'custom', label: 'Custom', ratio: 1 } // ratio from custom inputs
 ];
