@@ -2,7 +2,7 @@
  * AkiCrop – TypeScript types for template presets, border options, and render state.
  */
 
-export type TemplateId = '1:1' | '4:5' | '9:16' | '16:9' | '1.91:1' | 'original' | 'custom';
+export type TemplateId = '1:1' | '4:5' | '9:16' | '16:9' | '1.91:1' | '3:2' | '2:3' | 'original' | 'custom';
 
 export interface Template {
 	id: TemplateId;
@@ -46,6 +46,15 @@ export const TEMPLATES: Template[] = [
 	{ id: '9:16', label: 'Story (9:16)', ratio: 9 / 16 },
 	{ id: '16:9', label: 'Landscape (16:9)', ratio: 16 / 9 },
 	{ id: '1.91:1', label: 'Wide (1.91:1)', ratio: 1.91 }, // Instagram landscape post
+	{ id: '3:2', label: '3:2', ratio: 3 / 2 },
+	{ id: '2:3', label: '2:3', ratio: 2 / 3 },
 	{ id: 'original', label: 'Original', ratio: 0 },
 	{ id: 'custom', label: 'Custom', ratio: 1 } // ratio from custom inputs
 ];
+
+/** Common Instagram aspect ratios (feed + story). */
+export const INSTAGRAM_PRESETS: TemplateId[] = ['1:1', '4:5', '9:16', '1.91:1'];
+/** Grouped presets for aspect-ratio popup rows (Wide / Tall / Square + Original). */
+export const WIDE_PRESETS: TemplateId[] = ['16:9', '1.91:1', '3:2'];
+export const TALL_PRESETS: TemplateId[] = ['4:5', '9:16', '2:3'];
+export const SQUARE_PRESETS: TemplateId[] = ['1:1'];

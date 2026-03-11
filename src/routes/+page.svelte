@@ -1,20 +1,23 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { TEMPLATES, type TemplateId, type BorderType } from '$lib/types';
+	import { TEMPLATES, INSTAGRAM_PRESETS, WIDE_PRESETS, TALL_PRESETS, type TemplateId, type BorderType } from '$lib/types';
 	import { downscaleForPreview, debounce } from '$lib/utils';
 	import { getCanvasDimensions, renderCanvas } from '$lib/renderer';
 
 	const MAX_PREVIEW = 2048;
-	const INSTAGRAM_PORTRAIT_RATIO = 4 / 5; // width / height
+	const CAROUSEL_DEFAULT_RATIO = 4 / 5; // default panel aspect when "Original" is selected
 
-	type AppMode = 'crop' | 'carousel';
+	type AppMode = 'crop' | 'carousel' | 'stack';
 
 	// Mode from URL only. Toggle is real <a> links so navigation updates $page and the UI.
 	// Avoid url.searchParams during prerender (static build) — not available then
 	const appMode = $derived.by(() => {
 		if (typeof window === 'undefined') return 'crop' as AppMode;
-		return ($page.url.searchParams.get('mode') === 'carousel' ? 'carousel' : 'crop') as AppMode;
+		const mode = $page.url.searchParams.get('mode');
+		if (mode === 'carousel') return 'carousel' as AppMode;
+		if (mode === 'stack') return 'stack' as AppMode;
+		return 'crop' as AppMode;
 	});
 
 	let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -41,7 +44,7 @@
 	let selectedTemplateId = $state<TemplateId>('1:1');
 	let customRatioW = $state(16);
 	let customRatioH = $state(9);
-	let borderType = $state<BorderType>('solid');
+	let borderType = $state<BorderType>('auto');
 	let padding = $state(0);
 	let blurStrength = $state(25);
 	let solidColor = $state('#3b63fb');
@@ -52,9 +55,33 @@
 	let exportPreviewOpen = $state(false);
 	let exportPreviewPanels = $state<{ url: string; blob: Blob }[]>([]);
 
+	// Aspect ratio popup (after add image or "More ratios…")
+	let aspectRatioPopupOpen = $state(false);
+	let aspectPopupContentEl = $state<HTMLDivElement | null>(null);
+	/** Pending selection in popup; applied to canvas only on Confirm or double-click. */
+	let aspectPopupPendingTemplateId = $state<TemplateId | null>(null);
+	let aspectPopupFocusOnce = $state(false);
+	// Fill = cover (zoom to fill), Fit = contain (letterbox). Shared by Crop, popup previews, Carousel, Stack.
+	let fillMode = $state<'contain' | 'cover'>('contain');
+
 	const canUseShare = $derived(
 		typeof navigator !== 'undefined' && typeof navigator.share === 'function'
 	);
+
+	/** Sidebar tools are disabled until the current mode has an image. */
+	const sidebarHasImage = $derived.by(() => {
+		if (appMode === 'crop') return !!previewImage;
+		if (appMode === 'stack') return stackImages.length > 0;
+		return !!carouselImage;
+	});
+
+	/** Image used for aspect-ratio popup thumbnails and Original ratio: Crop/Carousel use current image; Stack uses first image. */
+	const aspectPopupImage = $derived.by(() => {
+		if (appMode === 'crop') return previewImage;
+		if (appMode === 'carousel') return carouselImage;
+		if (appMode === 'stack' && stackImages.length > 0) return stackImages[0].preview;
+		return previewImage || carouselImage;
+	});
 
 	// Carousel mode: independent image and panels (Instagram portrait strips)
 	let carouselImage = $state<ImageBitmap | null>(null);
@@ -65,6 +92,26 @@
 	let carouselError = $state<string | null>(null);
 	let carouselZoom = $state(100); // 100 = fill frame; >100 zoom in (crop more), <100 zoom out
 	let carouselNarrowImageWarning = $state(false); // image not wide enough for carousel
+
+	// Stack mode: ordered list of images, one aspect ratio for all
+	type StackImage = { blob: Blob; preview: ImageBitmap };
+	let stackImages = $state<StackImage[]>([]);
+	let stackFileInputEl = $state<HTMLInputElement | null>(null);
+	let stackListEl = $state<HTMLDivElement | null>(null);
+	let stackZoom = $state(1);
+	const STACK_PREVIEW_MAX = 400;
+	const STACK_ZOOM_MIN = 0.25;
+	const STACK_ZOOM_MAX = 2;
+	const STACK_ZOOM_STEP = 0.25;
+	function stackZoomIn() {
+		stackZoom = Math.min(STACK_ZOOM_MAX, Math.round((stackZoom + STACK_ZOOM_STEP) * 100) / 100);
+	}
+	function stackZoomOut() {
+		stackZoom = Math.max(STACK_ZOOM_MIN, Math.round((stackZoom - STACK_ZOOM_STEP) * 100) / 100);
+	}
+	function stackZoomReset() {
+		stackZoom = 1;
+	}
 
 	const template = $derived(TEMPLATES.find((t) => t.id === selectedTemplateId)!);
 	const templateRatio = $derived.by(() => {
@@ -78,12 +125,18 @@
 		return t.ratio;
 	});
 
+	// Carousel panel aspect: shared templateRatio; when Original (0) use 4:5 default
+	const carouselPanelRatio = $derived.by(() =>
+		templateRatio > 0 ? templateRatio : CAROUSEL_DEFAULT_RATIO
+	);
+
 	// Carousel: auto = one fewer panel than "full fit"; user can pick 2..auto (no single panel, no more than auto)
 	const carouselPanelCountAuto = $derived.by(() => {
 		if (!carouselImage) return 2;
 		const w = carouselImage.width;
 		const h = carouselImage.height;
-		const fit = Math.ceil((w / h) * (5 / 4));
+		const r = carouselPanelRatio;
+		const fit = Math.ceil((w / h) * (1 / r));
 		return Math.max(2, Math.min(20, fit - 1));
 	});
 	const carouselPanelCount = $derived.by(() => {
@@ -105,7 +158,7 @@
 		const availableWidth = cw - 2 * CAROUSEL_STRIP_PADDING - (n - 1) * CAROUSEL_STRIP_GAP;
 		if (availableWidth <= 0) return { width: 0, height: 0 };
 		const panelWidth = Math.floor(availableWidth / n);
-		const panelHeight = Math.round(panelWidth / INSTAGRAM_PORTRAIT_RATIO);
+		const panelHeight = Math.round(panelWidth / carouselPanelRatio);
 		return { width: panelWidth, height: panelHeight };
 	});
 
@@ -204,7 +257,8 @@
 			blurStrength,
 			solidColor,
 			width: previewDims.width,
-			height: previewDims.height
+			height: previewDims.height,
+			fillMode
 		});
 	};
 
@@ -219,6 +273,7 @@
 		solidColor;
 		borderType;
 		previewImage;
+		fillMode;
 		if (previewImage && canvasEl) debouncedRender();
 	});
 
@@ -246,10 +301,11 @@
 			const sx = viewLeft + i * sliceW;
 			// Contain until slice fills height; then cover so we crop top/bottom instead of adding side borders
 			const sliceAspect = sliceW / h;
-			const fillMode = sliceAspect >= INSTAGRAM_PORTRAIT_RATIO ? 'contain' : 'cover';
+			const panelRatio = carouselPanelRatio;
+			const fillMode = sliceAspect >= panelRatio ? 'contain' : 'cover';
 			renderCanvas(c, {
 				image: img,
-				templateRatio: INSTAGRAM_PORTRAIT_RATIO,
+				templateRatio: panelRatio,
 				padding,
 				borderType,
 				blurStrength,
@@ -320,6 +376,12 @@
 				originalHeight = bitmap.height;
 				previewImage = await downscaleForPreview(bitmap);
 				if (bitmap !== previewImage) bitmap.close();
+				aspectRatioPopupOpen = true;
+			} else if (appMode === 'stack') {
+				const preview = await downscaleForPreview(bitmap);
+				if (bitmap !== preview) bitmap.close();
+				stackImages = [...stackImages, { blob, preview }];
+				if (stackImages.length === 1) aspectRatioPopupOpen = true;
 			} else {
 				carouselOriginalBlob = blob;
 				carouselOriginalWidth = bitmap.width;
@@ -338,6 +400,48 @@
 		} finally {
 			loading = false;
 		}
+	}
+
+	function handleStackFiles(e: Event) {
+		const input = e.target as HTMLInputElement;
+		const files = input.files;
+		if (!files?.length) return;
+		for (let i = 0; i < files.length; i++) {
+			handleFile(files[i]);
+		}
+		input.value = '';
+	}
+
+	function removeStackImage(index: number) {
+		stackImages = stackImages.filter((_, i) => i !== index);
+	}
+
+	function clearStack() {
+		stackImages = [];
+	}
+
+	function clearCropImage() {
+		previewImage = null;
+		originalBlob = null;
+		originalWidth = 0;
+		originalHeight = 0;
+	}
+
+	function clearCarouselImage() {
+		carouselImage = null;
+		carouselOriginalBlob = null;
+		carouselOriginalWidth = 0;
+		carouselOriginalHeight = 0;
+		carouselNarrowImageWarning = false;
+		carouselError = null;
+	}
+
+	function moveStackImage(index: number, dir: -1 | 1) {
+		const next = index + dir;
+		if (next < 0 || next >= stackImages.length) return;
+		const arr = [...stackImages];
+		[arr[index], arr[next]] = [arr[next], arr[index]];
+		stackImages = arr;
 	}
 
 	function dismissCarouselNarrowWarning() {
@@ -373,7 +477,70 @@
 		e.preventDefault();
 	}
 
+	const EXPORT_STACK_WIDTH = 1080;
+
 	async function download() {
+		if (appMode === 'stack') {
+			if (!stackImages.length) return;
+			exportLoading = true;
+			try {
+				const ratio = templateRatio > 0 ? templateRatio : 1;
+				const cellWidth = EXPORT_STACK_WIDTH;
+				const firstPreviewDims = getCanvasDimensions(
+					stackImages[0].preview.width,
+					stackImages[0].preview.height,
+					templateRatio,
+					STACK_PREVIEW_MAX
+				);
+				const scale = firstPreviewDims.width > 0 ? cellWidth / firstPreviewDims.width : 1;
+				const exportPadding = Math.round(padding * scale);
+				const cellCanvases: HTMLCanvasElement[] = [];
+				for (const item of stackImages) {
+					const bitmap = await createImageBitmap(item.blob);
+					const r = templateRatio > 0 ? templateRatio : bitmap.width / bitmap.height;
+					const w = cellWidth;
+					const h = Math.round(cellWidth / r);
+					const c = document.createElement('canvas');
+					c.width = w;
+					c.height = h;
+					renderCanvas(c, {
+						image: bitmap,
+						templateRatio: r,
+						padding: exportPadding,
+						borderType,
+						blurStrength,
+						solidColor,
+						width: w,
+						height: h,
+						fillMode
+					});
+					bitmap.close();
+					cellCanvases.push(c);
+					totalHeight += h;
+				}
+				const out = document.createElement('canvas');
+				out.width = cellWidth;
+				out.height = totalHeight;
+				const ctx = out.getContext('2d')!;
+				let y = 0;
+				for (const c of cellCanvases) {
+					ctx.drawImage(c, 0, y, c.width, c.height);
+					y += c.height;
+				}
+				out.toBlob(
+					(blob) => {
+						if (blob) triggerDownloadFallback(blob, `akicrop-stack-${Date.now()}.png`);
+						exportLoading = false;
+					},
+					'image/png',
+					1
+				);
+			} catch (e) {
+				console.error('Stack export failed:', e);
+				exportLoading = false;
+			}
+			return;
+		}
 		if (appMode === 'carousel') {
 			if (!carouselOriginalBlob || !carouselImage || carouselPanelCount < 1) return;
 			exportLoading = true;
@@ -387,19 +554,20 @@
 				const viewLeft = zoomFactor <= 1 ? 0 : (w - viewWidth) / 2;
 				const sliceW = viewWidth / n;
 				const panels: { url: string; blob: Blob }[] = [];
-				const exportDims = getCanvasDimensions(sliceW, h, INSTAGRAM_PORTRAIT_RATIO, undefined);
+				const panelRatio = templateRatio > 0 ? templateRatio : CAROUSEL_DEFAULT_RATIO;
+				const exportDims = getCanvasDimensions(sliceW, h, panelRatio, undefined);
 				const scale = exportDims.width / carouselPanelDims.width;
 				const exportPadding = Math.round(padding * scale);
 				for (let i = 0; i < n; i++) {
 					const sx = viewLeft + i * sliceW;
 					const sliceAspect = sliceW / h;
-					const fillMode = sliceAspect >= INSTAGRAM_PORTRAIT_RATIO ? 'contain' : 'cover';
+					const fillMode = sliceAspect >= panelRatio ? 'contain' : 'cover';
 					const c = document.createElement('canvas');
 					c.width = exportDims.width;
 					c.height = exportDims.height;
 					renderCanvas(c, {
 						image: bitmap,
-						templateRatio: INSTAGRAM_PORTRAIT_RATIO,
+						templateRatio: panelRatio,
 						padding: exportPadding,
 						borderType,
 						blurStrength,
@@ -540,9 +708,15 @@
 	}
 
 	function onKeydown(e: KeyboardEvent) {
-		if (exportPreviewOpen && e.key === 'Escape') {
-			closeExportPreview();
-			return;
+		if (e.key === 'Escape') {
+			if (exportPreviewOpen) {
+				closeExportPreview();
+				return;
+			}
+			if (aspectRatioPopupOpen) {
+				closeAspectPopup();
+				return;
+			}
 		}
 		if ((e.ctrlKey || e.metaKey) && e.key === 's') {
 			e.preventDefault();
@@ -550,8 +724,117 @@
 		}
 	}
 
+	function getRatioForTemplateId(id: TemplateId): number {
+		if (id === 'original') return 0;
+		if (id === 'custom') {
+			const w = Math.max(0.1, customRatioW);
+			const h = Math.max(0.1, customRatioH);
+			return w / h;
+		}
+		const t = TEMPLATES.find((x) => x.id === id);
+		return t ? t.ratio : 1;
+	}
+
 	function setTemplate(id: TemplateId) {
 		selectedTemplateId = id;
+	}
+
+	function openAspectPopup() {
+		aspectPopupPendingTemplateId = selectedTemplateId;
+		const values = getPresetRatioValues(selectedTemplateId);
+		if (values) {
+			customRatioW = values.w;
+			customRatioH = values.h;
+		} else if (selectedTemplateId === 'original') {
+			const img = aspectPopupImage;
+			if (img) {
+				customRatioW = img.width;
+				customRatioH = img.height;
+			}
+		}
+		aspectPopupFocusOnce = true;
+		aspectRatioPopupOpen = true;
+	}
+
+	function closeAspectPopup() {
+		aspectRatioPopupOpen = false;
+		aspectPopupPendingTemplateId = null;
+	}
+
+	/** Canonical W∶H for presets (used to fill custom inputs). Original/custom have no fixed values. */
+	function getPresetRatioValues(id: TemplateId): { w: number; h: number } | null {
+		const map: Record<string, { w: number; h: number }> = {
+			'1:1': { w: 1, h: 1 },
+			'4:5': { w: 4, h: 5 },
+			'9:16': { w: 9, h: 16 },
+			'16:9': { w: 16, h: 9 },
+			'1.91:1': { w: 1.91, h: 1 },
+			'3:2': { w: 3, h: 2 },
+			'2:3': { w: 2, h: 3 }
+		};
+		return map[id] ?? null;
+	}
+
+	/** Find a preset that matches current custom W/H (within tolerance), or 'custom'. */
+	function getTemplateFromCustomRatio(): TemplateId {
+		const w = Math.max(0.1, customRatioW);
+		const h = Math.max(0.1, customRatioH);
+		const r = w / h;
+		const tol = 0.02;
+		for (const t of TEMPLATES) {
+			if (t.id === 'original' || t.id === 'custom') continue;
+			if (Math.abs(t.ratio - r) <= tol) return t.id;
+		}
+		return 'custom';
+	}
+
+	function selectAspectAndClose(id: TemplateId) {
+		setTemplate(id);
+		closeAspectPopup();
+	}
+
+	/** Single click: set pending selection and fill custom inputs (ratio not applied until Confirm). */
+	function onAspectThumbClick(id: TemplateId) {
+		const container = aspectPopupContentEl;
+		const scrollTop = container?.scrollTop ?? 0;
+		aspectPopupPendingTemplateId = id;
+		const values = getPresetRatioValues(id);
+		if (values) {
+			customRatioW = values.w;
+			customRatioH = values.h;
+		} else if (id === 'original') {
+			const img = aspectPopupImage;
+			if (img) {
+				customRatioW = img.width;
+				customRatioH = img.height;
+			}
+		}
+		requestAnimationFrame(() => {
+			if (container) container.scrollTop = scrollTop;
+		});
+	}
+
+	/** Double-click: apply selection and close. */
+	function onAspectThumbDblClick(id: TemplateId) {
+		selectedTemplateId = id;
+		const values = getPresetRatioValues(id);
+		if (values) {
+			customRatioW = values.w;
+			customRatioH = values.h;
+		} else if (id === 'original') {
+			const img = aspectPopupImage;
+			if (img) {
+				customRatioW = img.width;
+				customRatioH = img.height;
+			}
+		}
+		closeAspectPopup();
+	}
+
+	/** Confirm: apply current custom ratio (or matching preset) to canvas and close. */
+	function confirmAspectSelection() {
+		selectedTemplateId = getTemplateFromCustomRatio();
+		closeAspectPopup();
 	}
 
 	function setBorderType(type: BorderType) {
@@ -848,6 +1131,105 @@
 		if (zoomReturning || zoomReturningToMax || pinchActive) return;
 		clampPan();
 	});
+
+	// Prevent the base page from ever scrolling or bouncing (e.g. iOS rubber-band).
+	$effect(() => {
+		if (typeof document === 'undefined') return;
+		const html = document.documentElement;
+		const body = document.body;
+		html.style.overflow = 'hidden';
+		html.style.overscrollBehavior = 'none';
+		body.style.overflow = 'hidden';
+		body.style.overscrollBehavior = 'none';
+		return () => {
+			html.style.overflow = '';
+			html.style.overscrollBehavior = '';
+			body.style.overflow = '';
+			body.style.overscrollBehavior = '';
+		};
+	});
+
+	// Draw aspect popup thumbnails when popup opens and we have an image
+	const ASPECT_POPUP_ROWS: { label: string; ids: TemplateId[] }[] = [
+		{ label: 'Instagram', ids: INSTAGRAM_PRESETS },
+		{ label: 'Widest', ids: WIDE_PRESETS },
+		{ label: 'Tall', ids: TALL_PRESETS },
+		{ label: 'Square & more', ids: ['1:1', 'original', 'custom'] }
+	];
+	const ASPECT_POPUP_THUMB_SIZE = 80;
+
+	$effect(() => {
+		if (!aspectRatioPopupOpen || !aspectPopupContentEl) return;
+		const img = aspectPopupImage;
+		if (!img) return;
+		const container = aspectPopupContentEl;
+		const scrollTop = container.scrollTop;
+		const canvases = container.querySelectorAll<HTMLCanvasElement>('[data-template-id]');
+		canvases.forEach((canvas) => {
+			const id = canvas.getAttribute('data-template-id') as TemplateId | null;
+			if (!id) return;
+			const ratio = getRatioForTemplateId(id);
+			const dims = getCanvasDimensions(img.width, img.height, ratio, ASPECT_POPUP_THUMB_SIZE);
+			if (dims.width <= 0 || dims.height <= 0) return;
+			renderCanvas(canvas, {
+				image: img,
+				templateRatio: ratio,
+				padding: 0,
+				borderType,
+				blurStrength,
+				solidColor,
+				width: dims.width,
+				height: dims.height,
+				fillMode
+			});
+		});
+		requestAnimationFrame(() => {
+			container.scrollTop = scrollTop;
+		});
+		if (aspectPopupFocusOnce) {
+			aspectPopupFocusOnce = false;
+			setTimeout(() => {
+				const firstBtn = aspectPopupContentEl?.querySelector<HTMLButtonElement>('.aspect-popup-thumb-btn');
+				firstBtn?.focus();
+			}, 0);
+		}
+	});
+
+	// Render stack cell canvases when stack images or ratio/padding change
+	const debouncedStackRender = debounce(() => {
+		if (appMode !== 'stack' || !stackListEl || !stackImages.length) return;
+		const canvases = stackListEl.querySelectorAll<HTMLCanvasElement>('[data-stack-index]');
+		canvases.forEach((canvas) => {
+			const idx = parseInt(canvas.getAttribute('data-stack-index') ?? '-1', 10);
+			const item = stackImages[idx];
+			if (!item) return;
+			const dims = getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX);
+			if (dims.width <= 0 || dims.height <= 0) return;
+			renderCanvas(canvas, {
+				image: item.preview,
+				templateRatio,
+				padding,
+				borderType,
+				blurStrength,
+				solidColor,
+				width: dims.width,
+				height: dims.height,
+				fillMode
+			});
+		});
+	}, 16);
+
+	$effect(() => {
+		stackImages;
+		templateRatio;
+		padding;
+		borderType;
+		blurStrength;
+		solidColor;
+		fillMode;
+		stackListEl;
+		if (appMode === 'stack' && stackListEl && stackImages.length) debouncedStackRender();
+	});
 </script>
 
 <svelte:window onkeydown={onKeydown} onpointerup={() => setSliderActive(null)} />
@@ -859,12 +1241,13 @@
 		<div class="topbar-mode" role="group" aria-label="Mode">
 			<a href="?mode=crop" class="topbar-mode-btn" class:selected={appMode === 'crop'} title="Crop">Crop</a>
 			<a href="?mode=carousel" class="topbar-mode-btn" class:selected={appMode === 'carousel'} title="Carousel">Carousel</a>
+			<a href="?mode=stack" class="topbar-mode-btn" class:selected={appMode === 'stack'} title="Stack">Stack</a>
 		</div>
 		<button
 			class="btn btn-primary"
-			disabled={appMode === 'crop' ? !previewImage || exportLoading : !carouselImage || exportLoading}
+			disabled={appMode === 'crop' ? !previewImage || exportLoading : appMode === 'stack' ? !stackImages.length || exportLoading : !carouselImage || exportLoading}
 			onclick={download}
-			title={appMode === 'carousel' ? 'Export carousel' : 'Export (Ctrl+S)'}
+			title={appMode === 'stack' ? 'Export stack' : appMode === 'carousel' ? 'Export carousel' : 'Export (Ctrl+S)'}
 		>
 			{exportLoading ? 'Exporting…' : 'Export'}
 		</button>
@@ -876,7 +1259,7 @@
 			ondrop={onDrop}
 			ondragover={onDragOver}
 			role="region"
-			aria-label={appMode === 'crop' ? 'Canvas' : 'Carousel'}
+			aria-label={appMode === 'crop' ? 'Canvas' : appMode === 'stack' ? 'Stack' : 'Carousel'}
 		>
 			{#if appMode === 'crop'}
 				<div
@@ -934,6 +1317,60 @@
 						<button type="button" class="zoom-btn" onclick={zoomIn} title="Zoom in">+</button>
 					</footer>
 				{/if}
+			{:else if appMode === 'stack'}
+				<div
+					bind:this={canvasWrapEl}
+					class="canvas-viewport stack-viewport"
+					class:dropzone={!stackImages.length}
+				>
+					{#if stackImages.length}
+						<div class="stack-scroll">
+							<div class="stack-zoom-wrap" style="transform: scale({stackZoom}); transform-origin: top center;">
+								<div class="stack-list" bind:this={stackListEl}>
+									{#each stackImages as item, i}
+										<div class="stack-cell-wrap">
+											<div class="stack-cell">
+												<canvas
+													class="stack-cell-canvas"
+													data-stack-index={i}
+													width={getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX).width}
+													height={getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX).height}
+												></canvas>
+											</div>
+											<div class="stack-cell-actions">
+												<button type="button" class="stack-cell-btn" onclick={() => moveStackImage(i, -1)} disabled={i === 0} title="Move up">↑</button>
+												<button type="button" class="stack-cell-btn" onclick={() => moveStackImage(i, 1)} disabled={i === stackImages.length - 1} title="Move down">↓</button>
+												<button type="button" class="stack-cell-btn stack-cell-remove" onclick={() => removeStackImage(i)} title="Remove">×</button>
+											</div>
+										</div>
+									{/each}
+								</div>
+							</div>
+						</div>
+						<footer class="zoom-bar">
+							<label class="zoom-btn">
+								<input type="file" accept="image/*" multiple onchange={handleStackFiles} />
+								Add image
+							</label>
+							<button type="button" class="zoom-btn" onclick={clearStack}>Clear all</button>
+							<button type="button" class="zoom-btn" onclick={stackZoomOut} title="Zoom out">−</button>
+							<button type="button" class="zoom-btn" class:selected={stackZoom === 1} onclick={stackZoomReset} title="100%">100%</button>
+							<span class="zoom-pct">{Math.round(stackZoom * 100)}%</span>
+							<button type="button" class="zoom-btn" onclick={stackZoomIn} title="Zoom in">+</button>
+						</footer>
+					{:else}
+						<div class="drop-message">
+							<p>Add images to stack vertically</p>
+							<label class="btn btn-secondary">
+								<input type="file" accept="image/*" multiple bind:this={stackFileInputEl} onchange={handleStackFiles} />
+								Add images
+							</label>
+						</div>
+						<label class="drop-overlay">
+							<input type="file" accept="image/*" multiple onchange={handleStackFiles} />
+						</label>
+					{/if}
+				</div>
 			{:else}
 				<div
 					bind:this={canvasWrapEl}
@@ -978,12 +1415,12 @@
 		</div>
 
 		<aside class="sidebar">
-			<div class="sidebar-body">
-				{#if appMode === 'crop'}
+			<div class="sidebar-body" class:sidebar-disabled={!sidebarHasImage} aria-disabled={!sidebarHasImage}>
+				{#if appMode === 'crop' || appMode === 'stack'}
 					<section class="control-group">
 						<h2 class="control-label">Template</h2>
 						<div class="template-row">
-							{#each TEMPLATES as t}
+							{#each [{ id: '1:1' as TemplateId, label: '1:1' }, { id: '4:5' as TemplateId, label: '4:5' }, { id: '16:9' as TemplateId, label: '16:9' }, { id: 'original' as TemplateId, label: 'Original' }] as t}
 								<button
 									class="sidebar-btn"
 									class:selected={selectedTemplateId === t.id}
@@ -994,6 +1431,23 @@
 								</button>
 							{/each}
 						</div>
+						<button type="button" class="sidebar-btn aspect-more-btn" onclick={openAspectPopup}>
+							More ratios…
+						</button>
+						{#if previewImage}
+							<button type="button" class="sidebar-btn aspect-more-btn remove-image-btn" onclick={clearCropImage}>
+								Remove image
+							</button>
+						{/if}
+						{#if appMode === 'crop' || appMode === 'stack'}
+							<div class="sidebar-fill-row">
+								<span class="control-label">Image in frame</span>
+								<div class="border-type-row fill-buttons-row">
+									<button type="button" class="sidebar-btn" class:selected={fillMode === 'contain'} onclick={() => (fillMode = 'contain')}>Fit</button>
+									<button type="button" class="sidebar-btn" class:selected={fillMode === 'cover'} onclick={() => (fillMode = 'cover')}>Fill</button>
+								</div>
+							</div>
+						{/if}
 						{#if selectedTemplateId === 'custom'}
 							<div class="custom-ratio-row">
 								<label class="custom-ratio-label">
@@ -1022,7 +1476,25 @@
 							</div>
 						{/if}
 					</section>
-				{:else}
+				{:else if appMode === 'carousel'}
+					<section class="control-group">
+						<h2 class="control-label">Panel aspect</h2>
+						<div class="template-row">
+							{#each [{ id: '1:1' as TemplateId, label: '1:1' }, { id: '4:5' as TemplateId, label: '4:5' }, { id: '16:9' as TemplateId, label: '16:9' }, { id: 'original' as TemplateId, label: 'Original' }] as t}
+								<button
+									class="sidebar-btn"
+									class:selected={selectedTemplateId === t.id}
+									onclick={() => setTemplate(t.id)}
+									type="button"
+								>
+									{t.label}
+								</button>
+							{/each}
+						</div>
+						<button type="button" class="sidebar-btn aspect-more-btn" onclick={openAspectPopup}>
+							More ratios…
+						</button>
+					</section>
 					<section class="control-group">
 						<h2 class="control-label">Panels</h2>
 						<div class="panel-dropdown-wrap">
@@ -1074,7 +1546,12 @@
 								</div>
 							{/if}
 						</div>
-						<p class="control-muted">{carouselPanelCount} Instagram portrait{carouselPanelCount !== 1 ? 's' : ''}</p>
+						<p class="control-muted">{carouselPanelCount} panel{carouselPanelCount !== 1 ? 's' : ''}</p>
+						{#if carouselImage}
+							<button type="button" class="sidebar-btn aspect-more-btn remove-image-btn" onclick={clearCarouselImage}>
+								Remove image
+							</button>
+						{/if}
 					</section>
 				{/if}
 
@@ -1083,11 +1560,11 @@
 					<div class="border-type-row">
 						<button
 							class="sidebar-btn"
-							class:selected={borderType === 'solid'}
-							onclick={() => setBorderType('solid')}
+							class:selected={borderType === 'auto'}
+							onclick={() => setBorderType('auto')}
 							type="button"
 						>
-							Solid
+							Auto
 						</button>
 						<button
 							class="sidebar-btn"
@@ -1099,16 +1576,16 @@
 						</button>
 						<button
 							class="sidebar-btn"
-							class:selected={borderType === 'auto'}
-							onclick={() => setBorderType('auto')}
+							class:selected={borderType === 'solid'}
+							onclick={() => setBorderType('solid')}
 							type="button"
 						>
-							Auto
+							Solid
 						</button>
 					</div>
 				</section>
 
-				{#if appMode === 'crop'}
+				{#if appMode === 'crop' || appMode === 'stack'}
 					<section class="control-group">
 						<div class="slider-label">
 							<span>Padding</span>
@@ -1265,6 +1742,106 @@
 		</div>
 	{/if}
 
+	{#if aspectRatioPopupOpen}
+		<div
+			class="export-preview-overlay aspect-popup-overlay"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Choose aspect ratio"
+			onclick={(e) => e.target === e.currentTarget && closeAspectPopup()}
+		>
+			<div class="aspect-popup-box" onclick={(e) => e.stopPropagation()}>
+				<div class="export-preview-header">
+					<h2 class="export-preview-title">Choose aspect ratio</h2>
+					<button type="button" class="export-preview-close" aria-label="Close" onclick={closeAspectPopup}>×</button>
+				</div>
+				<div class="aspect-popup-fill-row">
+					<span class="control-label">Image in frame</span>
+					<div class="border-type-row">
+						<button
+							type="button"
+							class="sidebar-btn"
+							class:selected={fillMode === 'contain'}
+							onclick={() => (fillMode = 'contain')}
+						>
+							Fit
+						</button>
+						<button
+							type="button"
+							class="sidebar-btn"
+							class:selected={fillMode === 'cover'}
+							onclick={() => (fillMode = 'cover')}
+						>
+							Fill
+						</button>
+					</div>
+				</div>
+				<div class="aspect-popup-body" bind:this={aspectPopupContentEl}>
+					{#each ASPECT_POPUP_ROWS as row}
+						<div class="aspect-popup-row">
+							<span class="aspect-popup-row-label">{row.label}</span>
+							<div class="aspect-popup-thumbs">
+								{#each row.ids as id}
+									{@const t = TEMPLATES.find((x) => x.id === id)}
+									<button
+										type="button"
+										class="aspect-popup-thumb-btn"
+										class:selected={(aspectPopupPendingTemplateId ?? selectedTemplateId) === id}
+										onclick={() => onAspectThumbClick(id)}
+										ondblclick={() => onAspectThumbDblClick(id)}
+										title={t?.label ?? id}
+										aria-label={t?.label ?? id}
+									>
+										<div class="aspect-popup-thumb-preview">
+											<!-- Dimensions set by effect so preview keeps correct aspect (e.g. 80×45 for 16:9) -->
+											<canvas
+												class="aspect-popup-thumb-canvas"
+												data-template-id={id}
+												style="pointer-events: none;"
+											></canvas>
+										</div>
+										<span class="aspect-popup-thumb-label">{t?.label ?? id}</span>
+									</button>
+								{/each}
+							</div>
+						</div>
+					{/each}
+				</div>
+				<div class="aspect-popup-footer">
+					<span class="control-label">Custom ratio</span>
+					<div class="aspect-popup-custom-row">
+						<label class="custom-ratio-label">
+							<span>W</span>
+							<input
+								type="number"
+								class="custom-ratio-input aspect-popup-ratio-input"
+								min="0.1"
+								step="0.1"
+								bind:value={customRatioW}
+								aria-label="Width"
+							/>
+						</label>
+						<span class="custom-ratio-sep">∶</span>
+						<label class="custom-ratio-label">
+							<span>H</span>
+							<input
+								type="number"
+								class="custom-ratio-input aspect-popup-ratio-input"
+								min="0.1"
+								step="0.1"
+								bind:value={customRatioH}
+								aria-label="Height"
+							/>
+						</label>
+						<button type="button" class="btn btn-primary aspect-popup-confirm-btn" onclick={confirmAspectSelection}>
+							Confirm
+						</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	{#if carouselNarrowImageWarning}
 		<div
 			class="export-preview-overlay narrow-warning-overlay"
@@ -1366,6 +1943,82 @@
 		flex-direction: row;
 	}
 
+	.stack-viewport {
+		flex-direction: column;
+		align-items: stretch;
+		justify-content: flex-start;
+		overflow: hidden;
+	}
+	.stack-scroll {
+		flex: 1;
+		min-height: 0;
+		min-width: 0;
+		width: 100%;
+		overflow-y: auto;
+		overflow-x: hidden;
+		-webkit-overflow-scrolling: touch;
+	}
+	.stack-zoom-wrap {
+		display: block;
+		width: 100%;
+		padding: 24px;
+		box-sizing: border-box;
+	}
+	.stack-list {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		width: 100%;
+		box-sizing: border-box;
+	}
+	.stack-cell-wrap {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		background: var(--bg-input);
+		border-radius: var(--radius);
+		padding: 12px;
+		border: 1px solid var(--border-subtle);
+	}
+	.stack-cell {
+		flex-shrink: 0;
+		border-radius: var(--radius);
+		overflow: hidden;
+		box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+	}
+	.stack-cell-canvas {
+		display: block;
+		vertical-align: bottom;
+		max-width: 100%;
+	}
+	.stack-cell-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		margin-left: auto;
+	}
+	.stack-cell-btn {
+		min-width: 36px;
+		min-height: 32px;
+		padding: 4px 8px;
+		border: 1px solid var(--border-subtle);
+		border-radius: var(--radius);
+		background: var(--bg-panel);
+		color: var(--text-primary);
+		font-size: 14px;
+		cursor: pointer;
+		transition: background 0.15s;
+	}
+	.stack-cell-btn:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.08);
+	}
+	.stack-cell-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.stack-cell-remove {
+		color: var(--error, #c66);
+	}
 	.carousel-strip {
 		display: flex;
 		flex-direction: row;
@@ -1478,6 +2131,19 @@
 		background: var(--bg-panel);
 		border-top: 1px solid var(--border-subtle);
 	}
+	.zoom-bar label.zoom-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+	}
+	.zoom-bar input[type="file"] {
+		position: absolute;
+		opacity: 0;
+		pointer-events: none;
+		width: 0;
+		height: 0;
+	}
 
 	.zoom-btn {
 		min-width: var(--touch-min);
@@ -1519,6 +2185,15 @@
 		flex-direction: column;
 		overflow: hidden;
 	}
+	.sidebar-fill-row {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 8px;
+	}
+	.sidebar-fill-row .fill-buttons-row {
+		flex-wrap: nowrap;
+	}
 
 	.sidebar-body {
 		flex: 1;
@@ -1528,6 +2203,21 @@
 		flex-direction: column;
 		gap: 20px;
 		-webkit-overflow-scrolling: touch;
+	}
+	.sidebar-body.sidebar-disabled {
+		pointer-events: none;
+		opacity: 0.85;
+		filter: saturate(0.25) brightness(0.9);
+	}
+	.sidebar-body.sidebar-disabled .sidebar-btn.selected {
+		border-color: var(--border-subtle);
+		background: var(--bg-input);
+		color: var(--text-secondary);
+	}
+	.sidebar-body.sidebar-disabled .btn-primary {
+		background: var(--bg-input);
+		color: var(--text-secondary);
+		border: 1px solid var(--border-subtle);
 	}
 
 	.btn {
@@ -1723,6 +2413,138 @@
 		padding: 16px 24px;
 		border-top: 1px solid var(--border-subtle);
 		flex-shrink: 0;
+	}
+
+	.aspect-popup-overlay {
+		align-items: center;
+		justify-content: center;
+	}
+	.aspect-popup-box {
+		background: var(--bg-panel);
+		border-radius: var(--radius);
+		border: 1px solid var(--border-subtle);
+		width: min(560px, 92vw);
+		max-width: 92vw;
+		max-height: 85vh;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+	}
+	.aspect-popup-footer {
+		padding: 16px;
+		border-top: 1px solid var(--border-subtle);
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		flex-shrink: 0;
+		background: var(--bg-panel);
+	}
+	.aspect-popup-custom-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+	.aspect-popup-ratio-input {
+		width: 64px;
+	}
+	.aspect-popup-confirm-btn {
+		margin-left: auto;
+	}
+	.aspect-popup-fill-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		padding: 12px 16px 8px;
+		border-bottom: 1px solid var(--border-subtle);
+	}
+	.aspect-popup-body {
+		padding: 16px;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+	.aspect-popup-row {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.aspect-popup-row-label {
+		font-size: var(--font-size-label);
+		font-weight: 600;
+		color: var(--text-secondary);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.aspect-popup-thumbs {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+	}
+	.aspect-popup-thumb-btn {
+		width: 88px;
+		padding: 4px 0 6px;
+		border: 2px solid var(--border-subtle);
+		border-radius: var(--radius);
+		background: var(--bg-input);
+		cursor: pointer;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: flex-start;
+		gap: 4px;
+		overflow: hidden;
+		transition: border-color 0.15s, box-shadow 0.15s;
+	}
+	.aspect-popup-thumb-preview {
+		height: 80px;
+		width: 80px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+	}
+	.aspect-popup-thumb-label {
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--text-secondary);
+		text-align: center;
+		line-height: 1.2;
+		padding: 0 4px;
+	}
+	.aspect-popup-thumb-btn.selected .aspect-popup-thumb-label {
+		color: #a5b8ff;
+	}
+	.aspect-popup-thumb-btn:hover {
+		border-color: var(--text-secondary);
+	}
+	.aspect-popup-thumb-btn.selected {
+		border-color: var(--adobe-blue);
+		box-shadow: 0 0 0 2px rgba(59, 99, 251, 0.3);
+	}
+	/* Preserve aspect ratio: canvas is drawn at e.g. 80×45 for 16:9; display at natural size, max 80px */
+	.aspect-popup-thumb-canvas {
+		display: block;
+		max-width: 80px;
+		max-height: 80px;
+		width: auto;
+		height: auto;
+		flex-shrink: 0;
+		vertical-align: bottom;
+	}
+
+	.aspect-more-btn {
+		width: 100%;
+		margin-top: 4px;
+	}
+	.remove-image-btn {
+		color: var(--text-secondary);
+	}
+	.remove-image-btn:hover {
+		color: var(--error, #c66);
 	}
 
 	.narrow-warning-overlay {
