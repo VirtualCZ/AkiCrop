@@ -1,14 +1,26 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { TEMPLATES, INSTAGRAM_PRESETS, WIDE_PRESETS, TALL_PRESETS, type TemplateId, type BorderType } from '$lib/types';
+	import { TEMPLATES, type TemplateId, type BorderType } from '$lib/types';
 	import { downscaleForPreview, debounce } from '$lib/utils';
 	import { getCanvasDimensions, renderCanvas } from '$lib/renderer';
-
-	const MAX_PREVIEW = 2048;
-	const CAROUSEL_DEFAULT_RATIO = 4 / 5; // default panel aspect when "Original" is selected
-
-	type AppMode = 'crop' | 'carousel' | 'stack';
+	import {
+		MAX_PREVIEW,
+		CAROUSEL_DEFAULT_RATIO,
+		STACK_PREVIEW_MAX,
+		STACK_ZOOM_MIN,
+		STACK_ZOOM_MAX,
+		STACK_ZOOM_STEP,
+		EXPORT_STACK_WIDTH,
+		CAROUSEL_STRIP_PADDING,
+		CAROUSEL_STRIP_GAP,
+		ASPECT_POPUP_ROWS,
+		ASPECT_POPUP_THUMB_SIZE,
+		MAX_ZOOM,
+		ZOOM_RETURN_DURATION,
+		type AppMode
+	} from '$lib/constants';
+	import { Topbar, ExportPreview, AspectRatioPopup, NarrowImageWarning } from '$lib/components';
 
 	// Mode from URL only. Toggle is real <a> links so navigation updates $page and the UI.
 	// Avoid url.searchParams during prerender (static build) — not available then
@@ -51,9 +63,11 @@
 	let loading = $state(false);
 	let exportLoading = $state(false);
 
-	// Carousel export preview popup: final panel images + download
+	// Export preview popup (carousel or stack): final panel images + download/share
 	let exportPreviewOpen = $state(false);
 	let exportPreviewPanels = $state<{ url: string; blob: Blob }[]>([]);
+	/** Set when opening preview so filenames use akicrop-stack-N vs akicrop-panel-N */
+	let exportPreviewKind = $state<'carousel' | 'stack' | null>(null);
 
 	// Aspect ratio popup (after add image or "More ratios…")
 	let aspectRatioPopupOpen = $state(false);
@@ -99,10 +113,17 @@
 	let stackFileInputEl = $state<HTMLInputElement | null>(null);
 	let stackListEl = $state<HTMLDivElement | null>(null);
 	let stackZoom = $state(1);
-	const STACK_PREVIEW_MAX = 400;
-	const STACK_ZOOM_MIN = 0.25;
-	const STACK_ZOOM_MAX = 2;
-	const STACK_ZOOM_STEP = 0.25;
+	// 'list' = all images in scroll; 'story' = one at a time, drag to switch (images slide)
+	let stackViewMode = $state<'list' | 'story'>('list');
+	let stackStoryIndex = $state(0);
+	let stackStoryCanvasEl = $state<HTMLCanvasElement | null>(null);
+	let stackSwipeCanvasLeft = $state<HTMLCanvasElement | null>(null);
+	let stackSwipeCanvasCenter = $state<HTMLCanvasElement | null>(null);
+	let stackSwipeCanvasRight = $state<HTMLCanvasElement | null>(null);
+	let stackSwipeDragOffset = $state(0);
+	let stackSwipePointerStart = $state<{ x: number; startOffset: number } | null>(null);
+	const SWIPE_THRESHOLD = 60;
+	const SWIPE_DRAG_CLAMP = 0.4; // max drag as fraction of viewport
 	function stackZoomIn() {
 		stackZoom = Math.min(STACK_ZOOM_MAX, Math.round((stackZoom + STACK_ZOOM_STEP) * 100) / 100);
 	}
@@ -112,6 +133,41 @@
 	function stackZoomReset() {
 		stackZoom = 1;
 	}
+	function stackStoryPrev() {
+		if (stackImages.length <= 1) return;
+		stackStoryIndex = Math.max(0, stackStoryIndex - 1);
+	}
+	function stackStoryNext() {
+		if (stackImages.length <= 1) return;
+		stackStoryIndex = Math.min(stackImages.length - 1, stackStoryIndex + 1);
+	}
+
+	// Swipe view: current image and dimensions that fit viewport
+	const stackStoryCurrentItem = $derived(
+		stackImages.length > 0 ? stackImages[stackStoryIndex] ?? stackImages[0] : null
+	);
+	function getStackSwipeDims(item: StackImage) {
+		if (!item || containerSize.width <= 0 || containerSize.height <= 0)
+			return { width: 0, height: 0 };
+		const base = getCanvasDimensions(
+			item.preview.width,
+			item.preview.height,
+			templateRatio,
+			undefined
+		);
+		const scale = Math.min(
+			containerSize.width / base.width,
+			containerSize.height / base.height,
+			1
+		);
+		return {
+			width: Math.round(base.width * scale),
+			height: Math.round(base.height * scale)
+		};
+	}
+	const stackStoryDims = $derived.by(() =>
+		stackStoryCurrentItem ? getStackSwipeDims(stackStoryCurrentItem) : { width: 0, height: 0 }
+	);
 
 	const template = $derived(TEMPLATES.find((t) => t.id === selectedTemplateId)!);
 	const templateRatio = $derived.by(() => {
@@ -146,9 +202,6 @@
 	});
 	let panelsDropdownOpen = $state(false);
 
-	// Strip padding and gap (must match .carousel-strip CSS) so total width fits container, no scrollbar
-	const CAROUSEL_STRIP_PADDING = 24;
-	const CAROUSEL_STRIP_GAP = 8;
 	// Fixed panel size: fit inside container minus padding and gaps. Same size at all zoom levels.
 	const carouselPanelDims = $derived.by(() => {
 		const n = carouselPanelCount;
@@ -245,7 +298,12 @@
 	}
 	const canPan = $derived(zoom >= 1);
 
-	const zoomPercent = $derived(Math.round(zoom * 100));
+	// Show 100% when at fit (no borders); otherwise show actual zoom %
+	const zoomPercent = $derived.by(() => {
+		const raw = Math.round(zoom * 100);
+		const fit = Math.round(fitZoom * 100);
+		return Math.abs(zoom - fitZoom) < 0.005 ? 100 : raw;
+	});
 
 	const doRender = () => {
 		if (!canvasEl || !previewImage || previewDims.width <= 0 || previewDims.height <= 0) return;
@@ -347,6 +405,13 @@
 		solidColor;
 		carouselStripEl;
 		if (appMode === 'carousel' && carouselImage && carouselPanelCount > 0) debouncedCarouselRender();
+	});
+
+	// In Carousel, "Original" isn't meaningful (panels are slices); normalize to 4:5 so sidebar shows a selected preset
+	$effect(() => {
+		if (appMode === 'carousel' && selectedTemplateId === 'original') {
+			selectedTemplateId = '4:5';
+		}
 	});
 
 	// Measure canvas container so preview fits viewport (no overflow/scroll)
@@ -477,14 +542,11 @@
 		e.preventDefault();
 	}
 
-	const EXPORT_STACK_WIDTH = 1080;
-
 	async function download() {
 		if (appMode === 'stack') {
 			if (!stackImages.length) return;
 			exportLoading = true;
 			try {
-				const ratio = templateRatio > 0 ? templateRatio : 1;
 				const cellWidth = EXPORT_STACK_WIDTH;
 				const firstPreviewDims = getCanvasDimensions(
 					stackImages[0].preview.width,
@@ -494,7 +556,7 @@
 				);
 				const scale = firstPreviewDims.width > 0 ? cellWidth / firstPreviewDims.width : 1;
 				const exportPadding = Math.round(padding * scale);
-				const cellCanvases: HTMLCanvasElement[] = [];
+				const panels: { url: string; blob: Blob }[] = [];
 				for (const item of stackImages) {
 					const bitmap = await createImageBitmap(item.blob);
 					const r = templateRatio > 0 ? templateRatio : bitmap.width / bitmap.height;
@@ -515,30 +577,16 @@
 						fillMode
 					});
 					bitmap.close();
-					cellCanvases.push(c);
-					totalHeight += h;
+					const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png', 1));
+					if (blob) panels.push({ url: URL.createObjectURL(blob), blob });
 				}
-				const out = document.createElement('canvas');
-				out.width = cellWidth;
-				out.height = totalHeight;
-				const ctx = out.getContext('2d')!;
-				let y = 0;
-				for (const c of cellCanvases) {
-					ctx.drawImage(c, 0, y, c.width, c.height);
-					y += c.height;
-				}
-				out.toBlob(
-					(blob) => {
-						if (blob) triggerDownloadFallback(blob, `akicrop-stack-${Date.now()}.png`);
-						exportLoading = false;
-					},
-					'image/png',
-					1
-				);
+				exportPreviewKind = 'stack';
+				exportPreviewPanels = panels;
+				exportPreviewOpen = true;
 			} catch (e) {
 				console.error('Stack export failed:', e);
-				exportLoading = false;
 			}
+			exportLoading = false;
 			return;
 		}
 		if (appMode === 'carousel') {
@@ -584,6 +632,7 @@
 					}
 				}
 				bitmap.close();
+				exportPreviewKind = 'carousel';
 				exportPreviewPanels = panels;
 				exportPreviewOpen = true;
 			} catch (e) {
@@ -652,18 +701,21 @@
 		exportPreviewPanels.forEach((p) => URL.revokeObjectURL(p.url));
 		exportPreviewPanels = [];
 		exportPreviewOpen = false;
+		exportPreviewKind = null;
 	}
 
 	function downloadExportPreviewPanels() {
+		const prefix = exportPreviewKind === 'stack' ? 'akicrop-stack' : 'akicrop-panel';
 		const delay = 300;
 		exportPreviewPanels.forEach((p, i) => {
-			setTimeout(() => triggerDownloadFallback(p.blob, `akicrop-panel-${i + 1}.png`), i * delay);
+			setTimeout(() => triggerDownloadFallback(p.blob, `${prefix}-${i + 1}.png`), i * delay);
 		});
 	}
 
 	async function shareExportPreviewPanels() {
+		const prefix = exportPreviewKind === 'stack' ? 'akicrop-stack' : 'akicrop-panel';
 		const files = exportPreviewPanels.map(
-			(p, i) => new File([p.blob], `akicrop-panel-${i + 1}.png`, { type: 'image/png' })
+			(p, i) => new File([p.blob], `${prefix}-${i + 1}.png`, { type: 'image/png' })
 		);
 		try {
 			if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
@@ -715,6 +767,18 @@
 			}
 			if (aspectRatioPopupOpen) {
 				closeAspectPopup();
+				return;
+			}
+		}
+		if (appMode === 'stack' && stackViewMode === 'story' && stackImages.length > 1) {
+			if (e.key === 'ArrowLeft') {
+				e.preventDefault();
+				stackStoryPrev();
+				return;
+			}
+			if (e.key === 'ArrowRight') {
+				e.preventDefault();
+				stackStoryNext();
 				return;
 			}
 		}
@@ -848,15 +912,16 @@
 	function toggleFitMode() {
 		fitMode = !fitMode;
 		if (fitMode) {
-			zoom = fitZoom;
-			panX = 0;
-			panY = 0;
+			// Move image back into view (animate pan), don't reset zoom to 100%
+			animatePanBackIntoView();
 		}
 	}
 	function setZoom100() {
-		zoom = 1;
+		// 100% = fill viewport (no borders), not raw zoom 1
+		zoom = fitZoom;
+		panX = 0;
+		panY = 0;
 	}
-	const MAX_ZOOM = 3;
 	function zoomIn() {
 		zoom = Math.min(MAX_ZOOM, zoom * 1.25);
 	}
@@ -959,7 +1024,6 @@
 		}
 	}
 
-	const ZOOM_RETURN_DURATION = 220;
 	let zoomReturnRaf = 0;
 	let zoomReturning = $state(false);
 	let zoomReturningToMax = $state(false);
@@ -974,6 +1038,7 @@
 		const startZoom = zoom;
 		const startPanX = panX;
 		const startPanY = panY;
+		const targetZoom = fitZoom; // 100% = fill viewport (no borders)
 		const rect = canvasWrapEl?.getBoundingClientRect();
 		const vcx = rect ? rect.left + rect.width / 2 : 0;
 		const vcy = rect ? rect.top + rect.height / 2 : 0;
@@ -984,12 +1049,11 @@
 			const elapsed = now - startTime;
 			const t = Math.min(1, elapsed / ZOOM_RETURN_DURATION);
 			const e = easeOutCubic(t);
-			zoom = startZoom + (1 - startZoom) * e;
+			zoom = startZoom + (targetZoom - startZoom) * e;
 			const r = zoom / startZoom;
 			const pinchPanX = cx * (1 - r) + startPanX * r;
 			const pinchPanY = cy * (1 - r) + startPanY * r;
 			if (fitMode) {
-				// In Fit mode also ease pan to center so image ends centered at 100%
 				panX = pinchPanX * (1 - e);
 				panY = pinchPanY * (1 - e);
 			} else {
@@ -999,7 +1063,9 @@
 			if (t < 1) {
 				zoomReturnRaf = requestAnimationFrame(tick);
 			} else {
-				zoom = 1;
+				zoom = targetZoom;
+				panX = 0;
+				panY = 0;
 				zoomReturnRaf = 0;
 				zoomReturning = false;
 			}
@@ -1150,14 +1216,6 @@
 	});
 
 	// Draw aspect popup thumbnails when popup opens and we have an image
-	const ASPECT_POPUP_ROWS: { label: string; ids: TemplateId[] }[] = [
-		{ label: 'Instagram', ids: INSTAGRAM_PRESETS },
-		{ label: 'Widest', ids: WIDE_PRESETS },
-		{ label: 'Tall', ids: TALL_PRESETS },
-		{ label: 'Square & more', ids: ['1:1', 'original', 'custom'] }
-	];
-	const ASPECT_POPUP_THUMB_SIZE = 80;
-
 	$effect(() => {
 		if (!aspectRatioPopupOpen || !aspectPopupContentEl) return;
 		const img = aspectPopupImage;
@@ -1195,16 +1253,15 @@
 		}
 	});
 
-	// Render stack cell canvases when stack images or ratio/padding change
+	// Render stack cell canvases when stack images or ratio/padding change (iterate by index so last item is never skipped)
 	const debouncedStackRender = debounce(() => {
 		if (appMode !== 'stack' || !stackListEl || !stackImages.length) return;
-		const canvases = stackListEl.querySelectorAll<HTMLCanvasElement>('[data-stack-index]');
-		canvases.forEach((canvas) => {
-			const idx = parseInt(canvas.getAttribute('data-stack-index') ?? '-1', 10);
-			const item = stackImages[idx];
-			if (!item) return;
+		for (let i = 0; i < stackImages.length; i++) {
+			const canvas = stackListEl.querySelector<HTMLCanvasElement>(`[data-stack-index="${i}"]`);
+			const item = stackImages[i];
+			if (!canvas || !item) continue;
 			const dims = getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX);
-			if (dims.width <= 0 || dims.height <= 0) return;
+			if (dims.width <= 0 || dims.height <= 0) continue;
 			renderCanvas(canvas, {
 				image: item.preview,
 				templateRatio,
@@ -1216,7 +1273,7 @@
 				height: dims.height,
 				fillMode
 			});
-		});
+		}
 	}, 16);
 
 	$effect(() => {
@@ -1230,28 +1287,149 @@
 		stackListEl;
 		if (appMode === 'stack' && stackListEl && stackImages.length) debouncedStackRender();
 	});
+
+	// Clamp story index when stack length changes
+	$effect(() => {
+		const n = stackImages.length;
+		if (n === 0) return;
+		if (stackStoryIndex >= n) stackStoryIndex = n - 1;
+	});
+
+	// Render one swipe panel canvas
+	function renderStackSwipePanel(
+		canvas: HTMLCanvasElement | null,
+		item: StackImage | undefined,
+		dims: { width: number; height: number }
+	) {
+		if (!canvas || !item || dims.width <= 0 || dims.height <= 0) return;
+		renderCanvas(canvas, {
+			image: item.preview,
+			templateRatio,
+			padding,
+			borderType,
+			blurStrength,
+			solidColor,
+			width: dims.width,
+			height: dims.height,
+			fillMode
+		});
+	}
+	function renderAllStackSwipePanels() {
+		if (appMode !== 'stack' || stackViewMode !== 'story' || !stackImages.length) return;
+		const idx = stackStoryIndex;
+		const leftItem = idx > 0 ? stackImages[idx - 1] : null;
+		const centerItem = stackImages[idx];
+		const rightItem = idx < stackImages.length - 1 ? stackImages[idx + 1] : null;
+		renderStackSwipePanel(stackSwipeCanvasLeft, leftItem ?? undefined, leftItem ? getStackSwipeDims(leftItem) : { width: 0, height: 0 });
+		renderStackSwipePanel(stackSwipeCanvasCenter, centerItem, getStackSwipeDims(centerItem));
+		renderStackSwipePanel(stackSwipeCanvasRight, rightItem ?? undefined, rightItem ? getStackSwipeDims(rightItem) : { width: 0, height: 0 });
+	}
+	const debouncedStackSwipeRender = debounce(renderAllStackSwipePanels, 16);
+	$effect(() => {
+		stackStoryIndex;
+		stackImages;
+		templateRatio;
+		padding;
+		borderType;
+		blurStrength;
+		solidColor;
+		fillMode;
+		stackSwipeCanvasLeft;
+		stackSwipeCanvasCenter;
+		stackSwipeCanvasRight;
+		if (appMode === 'stack' && stackViewMode === 'story' && stackImages.length) {
+			// Run immediately so resized canvas is never left blank (changing width/height clears the canvas)
+			renderAllStackSwipePanels();
+			debouncedStackSwipeRender();
+		}
+	});
+	// Single canvas for when only one image (no strip)
+	$effect(() => {
+		stackStoryCurrentItem;
+		stackStoryDims.width;
+		stackStoryDims.height;
+		templateRatio;
+		padding;
+		borderType;
+		blurStrength;
+		solidColor;
+		fillMode;
+		stackStoryCanvasEl;
+		if (appMode === 'stack' && stackViewMode === 'story' && stackStoryCanvasEl && stackStoryCurrentItem && stackImages.length <= 1) {
+			renderStackSwipePanel(stackStoryCanvasEl, stackStoryCurrentItem, stackStoryDims);
+		}
+	});
+
+	// Swipe view: wheel to go next/prev
+	function onStackStoryWheel(e: WheelEvent) {
+		if (appMode !== 'stack' || stackViewMode !== 'story' || stackImages.length <= 1) return;
+		e.preventDefault();
+		if (e.deltaY > 0) stackStoryNext();
+		else if (e.deltaY < 0) stackStoryPrev();
+	}
+
+	// Swipe view: drag so images move with finger/mouse
+	function clampSwipeOffset(offset: number) {
+		const cw = containerSize.width;
+		const maxDrag = cw * SWIPE_DRAG_CLAMP;
+		if (stackStoryIndex <= 0) return Math.min(0, Math.max(-maxDrag, offset));
+		if (stackStoryIndex >= stackImages.length - 1) return Math.max(0, Math.min(maxDrag, offset));
+		return Math.max(-maxDrag, Math.min(maxDrag, offset));
+	}
+	function onStackSwipePointerDown(e: PointerEvent) {
+		if (e.button !== 0) return;
+		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		stackSwipePointerStart = { x: e.clientX, startOffset: stackSwipeDragOffset };
+	}
+	function onStackSwipePointerMove(e: PointerEvent) {
+		if (!stackSwipePointerStart) return;
+		const raw = stackSwipePointerStart.startOffset + (e.clientX - stackSwipePointerStart.x);
+		stackSwipeDragOffset = clampSwipeOffset(raw);
+	}
+	function onStackSwipePointerUp(e: PointerEvent) {
+		if (e.button !== 0) return;
+		(e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+		const offset = stackSwipeDragOffset;
+		stackSwipePointerStart = null;
+		if (offset > SWIPE_THRESHOLD && stackStoryIndex > 0) {
+			stackStoryPrev();
+		} else if (offset < -SWIPE_THRESHOLD && stackStoryIndex < stackImages.length - 1) {
+			stackStoryNext();
+		}
+		stackSwipeDragOffset = 0;
+	}
+	function onStackSwipeTouchStart(e: TouchEvent) {
+		if (e.touches.length === 1)
+			stackSwipePointerStart = { x: e.touches[0].clientX, startOffset: stackSwipeDragOffset };
+	}
+	function onStackSwipeTouchMove(e: TouchEvent) {
+		if (!stackSwipePointerStart || e.touches.length !== 1) return;
+		const raw = stackSwipePointerStart.startOffset + (e.touches[0].clientX - stackSwipePointerStart.x);
+		stackSwipeDragOffset = clampSwipeOffset(raw);
+	}
+	function onStackSwipeTouchEnd(e: TouchEvent) {
+		if (e.changedTouches.length !== 1) return;
+		const offset = stackSwipeDragOffset;
+		stackSwipePointerStart = null;
+		if (offset > SWIPE_THRESHOLD && stackStoryIndex > 0) {
+			stackStoryPrev();
+		} else if (offset < -SWIPE_THRESHOLD && stackStoryIndex < stackImages.length - 1) {
+			stackStoryNext();
+		}
+		stackSwipeDragOffset = 0;
+	}
 </script>
 
 <svelte:window onkeydown={onKeydown} onpointerup={() => setSliderActive(null)} />
 
 <a id="download-link" class="download-link" href="#" download> </a>
 <div class="app">
-	<header class="topbar">
-		<h1 class="topbar-title">AkiCrop</h1>
-		<div class="topbar-mode" role="group" aria-label="Mode">
-			<a href="?mode=crop" class="topbar-mode-btn" class:selected={appMode === 'crop'} title="Crop">Crop</a>
-			<a href="?mode=carousel" class="topbar-mode-btn" class:selected={appMode === 'carousel'} title="Carousel">Carousel</a>
-			<a href="?mode=stack" class="topbar-mode-btn" class:selected={appMode === 'stack'} title="Stack">Stack</a>
-		</div>
-		<button
-			class="btn btn-primary"
-			disabled={appMode === 'crop' ? !previewImage || exportLoading : appMode === 'stack' ? !stackImages.length || exportLoading : !carouselImage || exportLoading}
-			onclick={download}
-			title={appMode === 'stack' ? 'Export stack' : appMode === 'carousel' ? 'Export carousel' : 'Export (Ctrl+S)'}
-		>
-			{exportLoading ? 'Exporting…' : 'Export'}
-		</button>
-	</header>
+	<Topbar
+		appMode={appMode}
+		exportLoading={exportLoading}
+		canExport={appMode === 'crop' ? !!previewImage : appMode === 'stack' ? stackImages.length > 0 : !!carouselImage}
+		onExport={download}
+	/>
 
 	<div class="workspace">
 		<div
@@ -1322,42 +1500,89 @@
 					bind:this={canvasWrapEl}
 					class="canvas-viewport stack-viewport"
 					class:dropzone={!stackImages.length}
+					class:stack-story-view={stackViewMode === 'story' && stackImages.length > 0}
+					onwheel={stackViewMode === 'story' && stackImages.length > 1 ? onStackStoryWheel : undefined}
 				>
 					{#if stackImages.length}
-						<div class="stack-scroll">
-							<div class="stack-zoom-wrap" style="transform: scale({stackZoom}); transform-origin: top center;">
-								<div class="stack-list" bind:this={stackListEl}>
-									{#each stackImages as item, i}
-										<div class="stack-cell-wrap">
-											<div class="stack-cell">
-												<canvas
-													class="stack-cell-canvas"
-													data-stack-index={i}
-													width={getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX).width}
-													height={getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX).height}
-												></canvas>
+						{#if stackViewMode === 'story'}
+							{#if stackImages.length > 1}
+								<div
+									class="stack-swipe-track"
+									style="transform: translateX({stackSwipeDragOffset}px); width: {containerSize.width * 3}px;"
+									onpointerdown={onStackSwipePointerDown}
+									onpointermove={onStackSwipePointerMove}
+									onpointerup={onStackSwipePointerUp}
+									onpointerleave={onStackSwipePointerUp}
+									ontouchstart={onStackSwipeTouchStart}
+									ontouchmove={onStackSwipeTouchMove}
+									ontouchend={onStackSwipeTouchEnd}
+									ontouchcancel={onStackSwipeTouchEnd}
+								>
+									<div class="stack-swipe-panel" style="width: {containerSize.width}px; height: {containerSize.height}px;">
+										<canvas
+											bind:this={stackSwipeCanvasLeft}
+											class="stack-story-canvas"
+											width={stackStoryIndex > 0 ? getStackSwipeDims(stackImages[stackStoryIndex - 1]).width : 0}
+											height={stackStoryIndex > 0 ? getStackSwipeDims(stackImages[stackStoryIndex - 1]).height : 0}
+										></canvas>
+									</div>
+									<div class="stack-swipe-panel" style="width: {containerSize.width}px; height: {containerSize.height}px;">
+										<canvas
+											bind:this={stackSwipeCanvasCenter}
+											class="stack-story-canvas"
+											width={stackStoryDims.width}
+											height={stackStoryDims.height}
+										></canvas>
+									</div>
+									<div class="stack-swipe-panel" style="width: {containerSize.width}px; height: {containerSize.height}px;">
+										<canvas
+											bind:this={stackSwipeCanvasRight}
+											class="stack-story-canvas"
+											width={stackStoryIndex < stackImages.length - 1 ? getStackSwipeDims(stackImages[stackStoryIndex + 1]).width : 0}
+											height={stackStoryIndex < stackImages.length - 1 ? getStackSwipeDims(stackImages[stackStoryIndex + 1]).height : 0}
+										></canvas>
+									</div>
+								</div>
+								<div class="stack-story-nav" aria-label="Position">
+									<button type="button" class="stack-story-arrow" onclick={stackStoryPrev} disabled={stackStoryIndex === 0} title="Previous">←</button>
+									<span class="stack-story-counter">{stackStoryIndex + 1} / {stackImages.length}</span>
+									<button type="button" class="stack-story-arrow" onclick={stackStoryNext} disabled={stackStoryIndex === stackImages.length - 1} title="Next">→</button>
+								</div>
+							{:else}
+								<div class="stack-story-frame">
+									<canvas
+										bind:this={stackStoryCanvasEl}
+										class="stack-story-canvas"
+										width={stackStoryDims.width}
+										height={stackStoryDims.height}
+									></canvas>
+								</div>
+							{/if}
+						{:else}
+							<div class="stack-scroll">
+								<div class="stack-zoom-wrap" style="transform: scale({stackZoom}); transform-origin: top center;">
+									<div class="stack-list" bind:this={stackListEl}>
+										{#each stackImages as item, i}
+											<div class="stack-cell-wrap">
+												<div class="stack-cell">
+													<canvas
+														class="stack-cell-canvas"
+														data-stack-index={i}
+														width={getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX).width}
+														height={getCanvasDimensions(item.preview.width, item.preview.height, templateRatio, STACK_PREVIEW_MAX).height}
+													></canvas>
+												</div>
+												<div class="stack-cell-actions">
+													<button type="button" class="stack-cell-btn" onclick={() => moveStackImage(i, -1)} disabled={i === 0} title="Move up">↑</button>
+													<button type="button" class="stack-cell-btn" onclick={() => moveStackImage(i, 1)} disabled={i === stackImages.length - 1} title="Move down">↓</button>
+													<button type="button" class="stack-cell-btn stack-cell-remove" onclick={() => removeStackImage(i)} title="Remove">×</button>
+												</div>
 											</div>
-											<div class="stack-cell-actions">
-												<button type="button" class="stack-cell-btn" onclick={() => moveStackImage(i, -1)} disabled={i === 0} title="Move up">↑</button>
-												<button type="button" class="stack-cell-btn" onclick={() => moveStackImage(i, 1)} disabled={i === stackImages.length - 1} title="Move down">↓</button>
-												<button type="button" class="stack-cell-btn stack-cell-remove" onclick={() => removeStackImage(i)} title="Remove">×</button>
-											</div>
-										</div>
-									{/each}
+										{/each}
+									</div>
 								</div>
 							</div>
-						</div>
-						<footer class="zoom-bar">
-							<label class="zoom-btn">
-								<input type="file" accept="image/*" multiple onchange={handleStackFiles} />
-								Add image
-							</label>
-							<button type="button" class="zoom-btn" onclick={clearStack}>Clear all</button>
-							<button type="button" class="zoom-btn" onclick={stackZoomOut} title="Zoom out">−</button>
-							<button type="button" class="zoom-btn" class:selected={stackZoom === 1} onclick={stackZoomReset} title="100%">100%</button>
-							<span class="zoom-pct">{Math.round(stackZoom * 100)}%</span>
-							<button type="button" class="zoom-btn" onclick={stackZoomIn} title="Zoom in">+</button>
-						</footer>
+						{/if}
 					{:else}
 						<div class="drop-message">
 							<p>Add images to stack vertically</p>
@@ -1371,6 +1596,25 @@
 						</label>
 					{/if}
 				</div>
+				{#if appMode === 'stack' && stackImages.length}
+					<footer class="zoom-bar">
+						<button type="button" class="zoom-btn" class:selected={stackViewMode === 'list'} onclick={() => (stackViewMode = 'list')} title="List view">List</button>
+						<button type="button" class="zoom-btn" class:selected={stackViewMode === 'story'} onclick={() => (stackViewMode = 'story')} title="One at a time (drag to switch)">Swipe</button>
+						<label class="zoom-btn">
+							<input type="file" accept="image/*" multiple onchange={handleStackFiles} />
+							Add image
+						</label>
+						<button type="button" class="zoom-btn" onclick={clearStack}>Clear all</button>
+						{#if stackViewMode === 'list'}
+							<button type="button" class="zoom-btn" onclick={stackZoomOut} title="Zoom out">−</button>
+							<button type="button" class="zoom-btn" class:selected={stackZoom === 1} onclick={stackZoomReset} title="100%">100%</button>
+							<span class="zoom-pct">{Math.round(stackZoom * 100)}%</span>
+							<button type="button" class="zoom-btn" onclick={stackZoomIn} title="Zoom in">+</button>
+						{:else}
+							<span class="zoom-pct stack-story-pct">{stackStoryIndex + 1} / {stackImages.length}</span>
+						{/if}
+					</footer>
+				{/if}
 			{:else}
 				<div
 					bind:this={canvasWrapEl}
@@ -1480,7 +1724,7 @@
 					<section class="control-group">
 						<h2 class="control-label">Panel aspect</h2>
 						<div class="template-row">
-							{#each [{ id: '1:1' as TemplateId, label: '1:1' }, { id: '4:5' as TemplateId, label: '4:5' }, { id: '16:9' as TemplateId, label: '16:9' }, { id: 'original' as TemplateId, label: 'Original' }] as t}
+							{#each [{ id: '1:1' as TemplateId, label: '1:1' }, { id: '4:5' as TemplateId, label: '4:5' }, { id: '16:9' as TemplateId, label: '16:9' }] as t}
 								<button
 									class="sidebar-btn"
 									class:selected={selectedTemplateId === t.id}
@@ -1671,200 +1915,38 @@
 		</aside>
 	</div>
 
-	{#if exportPreviewOpen}
-		<div
-			class="export-preview-overlay"
-			role="dialog"
-			aria-modal="true"
-			aria-label="Export preview"
-			onclick={(e) => e.target === e.currentTarget && closeExportPreview()}
-		>
-			<div class="export-preview-box">
-				<div class="export-preview-header">
-					<h2 class="export-preview-title">Export preview</h2>
-					<button
-						type="button"
-						class="export-preview-close"
-						aria-label="Close"
-						onclick={closeExportPreview}
-					>
-						×
-					</button>
-				</div>
-				<div class="export-preview-strip">
-					{#each exportPreviewPanels as panel, i}
-						<div class="export-preview-panel">
-							<img src={panel.url} alt="Panel {i + 1}" />
-							{#if canUseShare}
-								<button
-									type="button"
-									class="btn btn-primary export-preview-panel-share"
-									onclick={() => shareExportPreviewPanel(panel, i)}
-									title="Share this panel"
-								>
-									Share
-								</button>
-							{:else}
-								<button
-									type="button"
-									class="btn btn-secondary export-preview-panel-dl"
-									onclick={() => triggerDownloadFallback(panel.blob, `akicrop-panel-${i + 1}.png`)}
-								>
-									Download
-								</button>
-							{/if}
-						</div>
-					{/each}
-				</div>
-				<div class="export-preview-actions">
-					<button
-						type="button"
-						class="btn btn-primary"
-						onclick={shareExportPreviewPanels}
-						title="Open system share sheet (e.g. AirDrop, Save to Files)"
-					>
-						Share
-					</button>
-					{#if !canUseShare}
-						<button
-							type="button"
-							class="btn btn-primary"
-							onclick={downloadExportPreviewPanels}
-						>
-							Download all
-						</button>
-					{/if}
-					<button type="button" class="btn btn-secondary" onclick={closeExportPreview}>
-						Close
-					</button>
-				</div>
-			</div>
-		</div>
-	{/if}
+	<ExportPreview
+		open={exportPreviewOpen}
+		panels={exportPreviewPanels}
+		canUseShare={canUseShare}
+		onClose={closeExportPreview}
+		onShareAll={shareExportPreviewPanels}
+		onDownloadAll={downloadExportPreviewPanels}
+		onSharePanel={shareExportPreviewPanel}
+		onDownloadPanel={(panel, i) => triggerDownloadFallback(panel.blob, `${exportPreviewKind === 'stack' ? 'akicrop-stack' : 'akicrop-panel'}-${i + 1}.png`)}
+	/>
 
-	{#if aspectRatioPopupOpen}
-		<div
-			class="export-preview-overlay aspect-popup-overlay"
-			role="dialog"
-			aria-modal="true"
-			aria-label="Choose aspect ratio"
-			onclick={(e) => e.target === e.currentTarget && closeAspectPopup()}
-		>
-			<div class="aspect-popup-box" onclick={(e) => e.stopPropagation()}>
-				<div class="export-preview-header">
-					<h2 class="export-preview-title">Choose aspect ratio</h2>
-					<button type="button" class="export-preview-close" aria-label="Close" onclick={closeAspectPopup}>×</button>
-				</div>
-				<div class="aspect-popup-fill-row">
-					<span class="control-label">Image in frame</span>
-					<div class="border-type-row">
-						<button
-							type="button"
-							class="sidebar-btn"
-							class:selected={fillMode === 'contain'}
-							onclick={() => (fillMode = 'contain')}
-						>
-							Fit
-						</button>
-						<button
-							type="button"
-							class="sidebar-btn"
-							class:selected={fillMode === 'cover'}
-							onclick={() => (fillMode = 'cover')}
-						>
-							Fill
-						</button>
-					</div>
-				</div>
-				<div class="aspect-popup-body" bind:this={aspectPopupContentEl}>
-					{#each ASPECT_POPUP_ROWS as row}
-						<div class="aspect-popup-row">
-							<span class="aspect-popup-row-label">{row.label}</span>
-							<div class="aspect-popup-thumbs">
-								{#each row.ids as id}
-									{@const t = TEMPLATES.find((x) => x.id === id)}
-									<button
-										type="button"
-										class="aspect-popup-thumb-btn"
-										class:selected={(aspectPopupPendingTemplateId ?? selectedTemplateId) === id}
-										onclick={() => onAspectThumbClick(id)}
-										ondblclick={() => onAspectThumbDblClick(id)}
-										title={t?.label ?? id}
-										aria-label={t?.label ?? id}
-									>
-										<div class="aspect-popup-thumb-preview">
-											<!-- Dimensions set by effect so preview keeps correct aspect (e.g. 80×45 for 16:9) -->
-											<canvas
-												class="aspect-popup-thumb-canvas"
-												data-template-id={id}
-												style="pointer-events: none;"
-											></canvas>
-										</div>
-										<span class="aspect-popup-thumb-label">{t?.label ?? id}</span>
-									</button>
-								{/each}
-							</div>
-						</div>
-					{/each}
-				</div>
-				<div class="aspect-popup-footer">
-					<span class="control-label">Custom ratio</span>
-					<div class="aspect-popup-custom-row">
-						<label class="custom-ratio-label">
-							<span>W</span>
-							<input
-								type="number"
-								class="custom-ratio-input aspect-popup-ratio-input"
-								min="0.1"
-								step="0.1"
-								bind:value={customRatioW}
-								aria-label="Width"
-							/>
-						</label>
-						<span class="custom-ratio-sep">∶</span>
-						<label class="custom-ratio-label">
-							<span>H</span>
-							<input
-								type="number"
-								class="custom-ratio-input aspect-popup-ratio-input"
-								min="0.1"
-								step="0.1"
-								bind:value={customRatioH}
-								aria-label="Height"
-							/>
-						</label>
-						<button type="button" class="btn btn-primary aspect-popup-confirm-btn" onclick={confirmAspectSelection}>
-							Confirm
-						</button>
-					</div>
-				</div>
-			</div>
-		</div>
-	{/if}
+	<AspectRatioPopup
+		open={aspectRatioPopupOpen}
+		fillMode={fillMode}
+		bind:customRatioW
+		bind:customRatioH
+		selectedTemplateId={selectedTemplateId}
+		aspectPopupPendingTemplateId={aspectPopupPendingTemplateId}
+		onClose={closeAspectPopup}
+		onFillModeContain={() => (fillMode = 'contain')}
+		onFillModeCover={() => (fillMode = 'cover')}
+		onAspectThumbClick={onAspectThumbClick}
+		onAspectThumbDblClick={onAspectThumbDblClick}
+		onConfirm={confirmAspectSelection}
+		onContentEl={(el) => (aspectPopupContentEl = el)}
+	/>
 
-	{#if carouselNarrowImageWarning}
-		<div
-			class="export-preview-overlay narrow-warning-overlay"
-			role="dialog"
-			aria-modal="true"
-			aria-labelledby="narrow-warning-title"
-		>
-			<div class="narrow-warning-box">
-				<h2 id="narrow-warning-title" class="narrow-warning-title">Image not wide enough for carousel</h2>
-				<p class="narrow-warning-text">
-					This image will be heavily cropped in carousel mode. You can continue anyway or switch to Crop mode to use it there instead.
-				</p>
-				<div class="narrow-warning-actions">
-					<button type="button" class="btn btn-primary" onclick={dismissCarouselNarrowWarning}>
-						Continue in Carousel
-					</button>
-					<button type="button" class="btn btn-secondary" onclick={switchToCropModeWithCarouselImage}>
-						Switch to Crop mode
-					</button>
-				</div>
-			</div>
-		</div>
-	{/if}
+	<NarrowImageWarning
+		open={carouselNarrowImageWarning}
+		onContinue={dismissCarouselNarrowWarning}
+		onSwitchToCrop={switchToCropModeWithCarouselImage}
+	/>
 </div>
 
 <style>
@@ -1886,56 +1968,6 @@
 		overflow: hidden;
 	}
 
-	.topbar {
-		height: var(--topbar-height);
-		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 0 16px;
-		gap: 12px;
-		background: var(--bg-panel);
-		border-bottom: 1px solid var(--border-subtle);
-	}
-
-	.topbar-title {
-		font-size: var(--font-size-title);
-		font-weight: 600;
-		margin: 0;
-		color: var(--text-primary);
-	}
-
-	.topbar-mode {
-		flex-shrink: 0;
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		background: var(--bg-input);
-		border-radius: var(--radius);
-		padding: 2px;
-	}
-	.topbar-mode-btn {
-		display: inline-block;
-		padding: 6px 12px;
-		border: none;
-		border-radius: 4px;
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: var(--font-size-label);
-		font-weight: 500;
-		text-decoration: none;
-		cursor: pointer;
-		transition: background 0.15s, color 0.15s;
-	}
-	.topbar-mode-btn:hover {
-		background: rgba(255, 255, 255, 0.06);
-		color: var(--text-primary);
-	}
-	.topbar-mode-btn.selected {
-		background: var(--adobe-blue);
-		color: white;
-	}
-
 	.workspace {
 		flex: 1;
 		min-height: 0;
@@ -1948,6 +1980,87 @@
 		align-items: stretch;
 		justify-content: flex-start;
 		overflow: hidden;
+	}
+	.stack-viewport.stack-story-view {
+		position: relative;
+		align-items: center;
+		justify-content: center;
+		touch-action: pan-y;
+		overflow: hidden;
+	}
+	.stack-swipe-track {
+		display: flex;
+		flex-direction: row;
+		flex-shrink: 0;
+		height: 100%;
+		cursor: grab;
+	}
+	.stack-swipe-track:active {
+		cursor: grabbing;
+	}
+	.stack-swipe-panel {
+		flex-shrink: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		overflow: hidden;
+	}
+	.stack-story-frame {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 100%;
+		height: 100%;
+		min-height: 0;
+	}
+	.stack-story-canvas {
+		display: block;
+		max-width: 100%;
+		max-height: 100%;
+		object-fit: contain;
+		box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+	}
+	.stack-story-nav {
+		position: absolute;
+		bottom: 12px;
+		left: 50%;
+		transform: translateX(-50%);
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 8px 16px;
+		border-radius: var(--radius);
+		background: rgba(0, 0, 0, 0.6);
+	}
+	.stack-story-arrow {
+		width: 36px;
+		height: 36px;
+		border: none;
+		border-radius: var(--radius);
+		background: rgba(255, 255, 255, 0.15);
+		color: var(--text-primary);
+		font-size: 18px;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+	}
+	.stack-story-arrow:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.25);
+	}
+	.stack-story-arrow:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.stack-story-counter {
+		font-size: var(--font-size-label);
+		color: var(--text-secondary);
+		min-width: 3em;
+		text-align: center;
+	}
+	.stack-story-pct {
+		min-width: 3em;
 	}
 	.stack-scroll {
 		flex: 1;
@@ -2121,6 +2234,7 @@
 	}
 
 	.zoom-bar {
+		width: 100%;
 		height: var(--zoombar-height);
 		flex-shrink: 0;
 		display: flex;
@@ -2128,6 +2242,7 @@
 		justify-content: center;
 		gap: 8px;
 		padding: 0 12px;
+		box-sizing: border-box;
 		background: var(--bg-panel);
 		border-top: 1px solid var(--border-subtle);
 	}
@@ -2214,53 +2329,6 @@
 		background: var(--bg-input);
 		color: var(--text-secondary);
 	}
-	.sidebar-body.sidebar-disabled .btn-primary {
-		background: var(--bg-input);
-		color: var(--text-secondary);
-		border: 1px solid var(--border-subtle);
-	}
-
-	.btn {
-		min-height: 36px;
-		padding: 8px 16px;
-		border-radius: var(--radius);
-		border: none;
-		font-size: var(--font-size-ui);
-		font-weight: 500;
-		cursor: pointer;
-		transition: filter 0.15s, background 0.15s;
-	}
-
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-
-	.btn-primary {
-		background: var(--adobe-blue);
-		color: white;
-	}
-
-	.btn-primary:hover:not(:disabled) {
-		filter: brightness(1.1);
-	}
-
-	.btn-secondary {
-		background: var(--bg-input);
-		color: var(--text-primary);
-		border: 1px solid var(--border-subtle);
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.btn-secondary input {
-		position: absolute;
-		opacity: 0;
-		pointer-events: none;
-		width: 0;
-		height: 0;
-	}
 
 	.drop-message {
 		display: flex;
@@ -2322,220 +2390,6 @@
 		}
 	}
 
-	.export-preview-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.7);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 100;
-		padding: 24px;
-		box-sizing: border-box;
-	}
-	.export-preview-box {
-		background: var(--bg-panel);
-		border-radius: var(--radius);
-		border: 1px solid var(--border-subtle);
-		max-width: 100%;
-		max-height: calc(100vh - 48px);
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
-	}
-	.export-preview-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--border-subtle);
-		flex-shrink: 0;
-	}
-	.export-preview-title {
-		margin: 0;
-		font-size: var(--font-size-title);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-	.export-preview-close {
-		width: 36px;
-		height: 36px;
-		border: none;
-		background: transparent;
-		color: var(--text-secondary);
-		font-size: 24px;
-		line-height: 1;
-		cursor: pointer;
-		border-radius: var(--radius);
-		padding: 0;
-	}
-	.export-preview-close:hover {
-		background: rgba(255, 255, 255, 0.06);
-		color: var(--text-primary);
-	}
-	.export-preview-strip {
-		display: flex;
-		flex-direction: row;
-		flex-wrap: nowrap;
-		gap: 12px;
-		padding: 24px;
-		overflow-x: auto;
-		overflow-y: hidden;
-		justify-content: center;
-		min-height: 0;
-		flex: 1;
-	}
-	.export-preview-panel {
-		flex-shrink: 0;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 10px;
-	}
-	.export-preview-panel img {
-		display: block;
-		vertical-align: bottom;
-		max-height: 50vh;
-		width: auto;
-		height: auto;
-		border-radius: var(--radius);
-		overflow: hidden;
-		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-	}
-	.export-preview-panel-dl,
-	.export-preview-panel-share {
-		width: 100%;
-	}
-	.export-preview-actions {
-		display: flex;
-		gap: 12px;
-		padding: 16px 24px;
-		border-top: 1px solid var(--border-subtle);
-		flex-shrink: 0;
-	}
-
-	.aspect-popup-overlay {
-		align-items: center;
-		justify-content: center;
-	}
-	.aspect-popup-box {
-		background: var(--bg-panel);
-		border-radius: var(--radius);
-		border: 1px solid var(--border-subtle);
-		width: min(560px, 92vw);
-		max-width: 92vw;
-		max-height: 85vh;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
-	}
-	.aspect-popup-footer {
-		padding: 16px;
-		border-top: 1px solid var(--border-subtle);
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		flex-shrink: 0;
-		background: var(--bg-panel);
-	}
-	.aspect-popup-custom-row {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		flex-wrap: wrap;
-	}
-	.aspect-popup-ratio-input {
-		width: 64px;
-	}
-	.aspect-popup-confirm-btn {
-		margin-left: auto;
-	}
-	.aspect-popup-fill-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 16px;
-		padding: 12px 16px 8px;
-		border-bottom: 1px solid var(--border-subtle);
-	}
-	.aspect-popup-body {
-		padding: 16px;
-		overflow-y: auto;
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-	}
-	.aspect-popup-row {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-	.aspect-popup-row-label {
-		font-size: var(--font-size-label);
-		font-weight: 600;
-		color: var(--text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-	}
-	.aspect-popup-thumbs {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 10px;
-	}
-	.aspect-popup-thumb-btn {
-		width: 88px;
-		padding: 4px 0 6px;
-		border: 2px solid var(--border-subtle);
-		border-radius: var(--radius);
-		background: var(--bg-input);
-		cursor: pointer;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: flex-start;
-		gap: 4px;
-		overflow: hidden;
-		transition: border-color 0.15s, box-shadow 0.15s;
-	}
-	.aspect-popup-thumb-preview {
-		height: 80px;
-		width: 80px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-	}
-	.aspect-popup-thumb-label {
-		font-size: 11px;
-		font-weight: 500;
-		color: var(--text-secondary);
-		text-align: center;
-		line-height: 1.2;
-		padding: 0 4px;
-	}
-	.aspect-popup-thumb-btn.selected .aspect-popup-thumb-label {
-		color: #a5b8ff;
-	}
-	.aspect-popup-thumb-btn:hover {
-		border-color: var(--text-secondary);
-	}
-	.aspect-popup-thumb-btn.selected {
-		border-color: var(--adobe-blue);
-		box-shadow: 0 0 0 2px rgba(59, 99, 251, 0.3);
-	}
-	/* Preserve aspect ratio: canvas is drawn at e.g. 80×45 for 16:9; display at natural size, max 80px */
-	.aspect-popup-thumb-canvas {
-		display: block;
-		max-width: 80px;
-		max-height: 80px;
-		width: auto;
-		height: auto;
-		flex-shrink: 0;
-		vertical-align: bottom;
-	}
-
 	.aspect-more-btn {
 		width: 100%;
 		margin-top: 4px;
@@ -2545,36 +2399,6 @@
 	}
 	.remove-image-btn:hover {
 		color: var(--error, #c66);
-	}
-
-	.narrow-warning-overlay {
-		align-items: center;
-		justify-content: center;
-	}
-	.narrow-warning-box {
-		background: var(--bg-panel);
-		border-radius: var(--radius);
-		border: 1px solid var(--border-subtle);
-		padding: 24px;
-		max-width: 360px;
-		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
-	}
-	.narrow-warning-title {
-		margin: 0 0 12px;
-		font-size: var(--font-size-title);
-		font-weight: 600;
-		color: var(--text-primary);
-	}
-	.narrow-warning-text {
-		margin: 0 0 20px;
-		font-size: var(--font-size-ui);
-		color: var(--text-secondary);
-		line-height: 1.4;
-	}
-	.narrow-warning-actions {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
 	}
 
 	.control-group {

@@ -1,6 +1,12 @@
-# sv
+# AkiCrop
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+Image framing PWA (crop, carousel, stack) – SvelteKit.
+
+**Versioning** (semver while in dev): `MAJOR.MINOR.PATCH`  
+- **First** (major): big release (e.g. 1.0 when leaving “dev”).  
+- **Second** (minor): bigger improvement / new features.  
+- **Third** (patch): bugfixes.  
+We’re on **0.x.y** until stable.
 
 ## Creating a project
 

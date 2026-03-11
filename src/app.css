@@ -37,3 +37,46 @@ html, body {
 	background: var(--bg-app);
 	-webkit-tap-highlight-color: transparent;
 }
+
+/* Shared buttons – used by Topbar, Sidebar, modals, workspaces */
+.btn {
+	min-height: 36px;
+	padding: 8px 16px;
+	border-radius: var(--radius);
+	border: none;
+	font-size: var(--font-size-ui);
+	font-weight: 500;
+	cursor: pointer;
+	transition: filter 0.15s, background 0.15s;
+}
+.btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+.btn-primary {
+	background: var(--adobe-blue);
+	color: white;
+}
+.btn-primary:hover:not(:disabled) {
+	filter: brightness(1.1);
+}
+.btn-secondary {
+	background: var(--bg-input);
+	color: var(--text-primary);
+	border: 1px solid var(--border-subtle);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+.btn-secondary input {
+	position: absolute;
+	opacity: 0;
+	pointer-events: none;
+	width: 0;
+	height: 0;
+}
+.sidebar-body.sidebar-disabled .btn-primary {
+	background: var(--bg-input);
+	color: var(--text-secondary);
+	border: 1px solid var(--border-subtle);
+}
