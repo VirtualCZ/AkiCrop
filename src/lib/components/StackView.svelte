@@ -706,6 +706,24 @@
 			gap: 6px;
 			padding: 0 6px;
 		}
+		.stack-zoom-wrap {
+			padding: 12px;
+		}
+		.stack-cell-wrap {
+			gap: 8px;
+			padding: 8px;
+		}
+		.stack-cell {
+			flex: 1 1 auto;
+			min-width: 0;
+		}
+		.stack-cell-canvas {
+			width: 100%;
+			height: auto;
+		}
+		.stack-cell-actions {
+			flex: 0 0 auto;
+		}
 		.zoom-group-zoom {
 			display: none;
 		}
