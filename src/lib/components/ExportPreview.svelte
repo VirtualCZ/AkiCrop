@@ -214,12 +214,17 @@
 					type="button"
 					class="btn btn-primary"
 					onclick={onShareAll}
-					title="Open system share sheet (e.g. AirDrop, Save to Files)"
+					title="Share all exported panels"
 				>
-					Share
+					Share all
 				</button>
 				{#if !canUseShare}
-					<button type="button" class="btn btn-primary" onclick={onDownloadAll}>
+					<button
+						type="button"
+						class="btn btn-primary"
+						onclick={onDownloadAll}
+						title="Download all exported panels"
+					>
 						Download all
 					</button>
 				{/if}
@@ -516,5 +521,31 @@
 		padding: 16px 24px;
 		border-top: 1px solid var(--border-subtle);
 		flex-shrink: 0;
+	}
+	@media (max-width: 767px) {
+		.export-preview-overlay {
+			padding: 12px;
+		}
+		.export-preview-box {
+			max-height: calc(100dvh - 24px);
+		}
+		.export-preview-options {
+			padding: 10px 12px;
+			gap: 8px;
+		}
+		.export-preview-strip {
+			padding: 10px 12px;
+			gap: 8px;
+		}
+		.export-preview-panel {
+			gap: 6px;
+		}
+		.export-preview-panel img {
+			max-height: 34dvh;
+		}
+		.export-preview-actions {
+			padding: 10px 12px;
+			gap: 8px;
+		}
 	}
 </style>
