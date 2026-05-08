@@ -389,19 +389,19 @@
 		<div class="zoom-group">
 			<button type="button" class="zoom-btn" class:selected={stackViewMode === 'list'} onclick={() => (stackViewMode = 'list')} title="List view">List</button>
 			<button type="button" class="zoom-btn" class:selected={stackViewMode === 'story'} onclick={() => (stackViewMode = 'story')} title="One at a time (drag to switch)">Swipe</button>
-		</div>
-		<div class="zoom-group">
-			<label class="zoom-btn">
-				<input type="file" accept="image/*" multiple onchange={onStackFiles} />
-				Add
-			</label>
-			<button type="button" class="zoom-btn" onclick={clearStack}>Clear</button>
+			<div class="zoom-subgroup">
+				<label class="zoom-btn">
+					<input type="file" accept="image/*" multiple onchange={onStackFiles} />
+					Add
+				</label>
+				<button type="button" class="zoom-btn" onclick={clearStack}>Clear</button>
+			</div>
 		</div>
 		{#if stackViewMode === 'list'}
 			<div class="zoom-group zoom-group-zoom">
-				<button type="button" class="zoom-btn" onclick={stackZoomOut} title="Zoom out">−</button>
 				<button type="button" class="zoom-btn" class:selected={stackZoom === 1} onclick={stackZoomReset} title="100%">100%</button>
 				<span class="zoom-pct">{Math.round(stackZoom * 100)}%</span>
+				<button type="button" class="zoom-btn" onclick={stackZoomOut} title="Zoom out">−</button>
 				<button type="button" class="zoom-btn" onclick={stackZoomIn} title="Zoom in">+</button>
 			</div>
 		{/if}
@@ -617,7 +617,7 @@
 		flex-shrink: 0;
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
+		justify-content: flex-start;
 		gap: 8px;
 		padding: 0 8px;
 		box-sizing: border-box;
@@ -629,6 +629,14 @@
 		align-items: center;
 		gap: 6px;
 		flex-shrink: 0;
+	}
+	.zoom-subgroup {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		margin-left: 10px;
+		padding-left: 10px;
+		border-left: 1px solid var(--border-subtle);
 	}
 	.zoom-group-zoom {
 		margin-left: auto;
@@ -697,7 +705,6 @@
 			height: 36px;
 			gap: 6px;
 			padding: 0 6px;
-			justify-content: space-between;
 		}
 		.zoom-group-zoom {
 			display: none;

@@ -438,11 +438,15 @@
 
 {#if previewImage}
 	<footer class="zoom-bar">
-		<button type="button" class="zoom-btn" class:selected={fitMode} onclick={toggleFitMode} title="Fit (keep image in view)">Fit</button>
-		<button type="button" class="zoom-btn" onclick={setZoom100} title="100%">100%</button>
-		<span class="zoom-pct">{zoomPercent}%</span>
-		<button type="button" class="zoom-btn" onclick={zoomOut} title="Zoom out">−</button>
-		<button type="button" class="zoom-btn" onclick={zoomIn} title="Zoom in">+</button>
+		<div class="zoom-group">
+			<button type="button" class="zoom-btn" class:selected={fitMode} onclick={toggleFitMode} title="Fit (keep image in view)">Fit</button>
+		</div>
+		<div class="zoom-group zoom-group-right">
+			<button type="button" class="zoom-btn" onclick={setZoom100} title="100%">100%</button>
+			<span class="zoom-pct">{zoomPercent}%</span>
+			<button type="button" class="zoom-btn" onclick={zoomOut} title="Zoom out">−</button>
+			<button type="button" class="zoom-btn" onclick={zoomIn} title="Zoom in">+</button>
+		</div>
 	</footer>
 {/if}
 
@@ -542,12 +546,20 @@
 		flex-shrink: 0;
 		display: flex;
 		align-items: center;
-		justify-content: center;
+		justify-content: flex-start;
 		gap: 8px;
-		padding: 0 12px;
+		padding: 0 8px;
 		box-sizing: border-box;
 		background: var(--bg-panel);
 		border-top: 1px solid var(--border-subtle);
+	}
+	.zoom-group {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.zoom-group-right {
+		margin-left: auto;
 	}
 	.zoom-btn {
 		min-width: var(--touch-min);
