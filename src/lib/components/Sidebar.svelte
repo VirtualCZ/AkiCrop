@@ -33,7 +33,7 @@
 		carouselZoomMax: number;
 		blurStrength: number;
 		solidColor: string;
-	}
+}
 	let {
 		appMode,
 		disabled,
@@ -343,6 +343,7 @@
 	.sidebar {
 		width: var(--sidebar-width);
 		flex-shrink: 0;
+		min-height: 0;
 		background: var(--bg-panel);
 		border-left: 1px solid var(--border-subtle);
 		display: flex;
@@ -360,17 +361,28 @@
 	}
 	.sidebar-body {
 		flex: 1;
+		min-height: 0;
 		overflow-y: auto;
+		overflow-x: hidden;
 		padding: 24px;
 		display: flex;
 		flex-direction: column;
 		gap: 20px;
 		-webkit-overflow-scrolling: touch;
+		overscroll-behavior: contain;
+		touch-action: pan-y;
+		scrollbar-width: thin;
+		scrollbar-color: var(--track-dark) transparent;
 	}
 	.sidebar-body.sidebar-disabled {
-		pointer-events: none;
 		opacity: 0.85;
 		filter: saturate(0.25) brightness(0.9);
+	}
+	.sidebar-body.sidebar-disabled button,
+	.sidebar-body.sidebar-disabled input,
+	.sidebar-body.sidebar-disabled select,
+	.sidebar-body.sidebar-disabled textarea {
+		pointer-events: none;
 	}
 	.sidebar-body.sidebar-disabled .sidebar-btn.selected {
 		border-color: var(--border-subtle);
@@ -431,6 +443,30 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
+		scrollbar-width: thin;
+		scrollbar-color: var(--track-dark) transparent;
+	}
+	.sidebar-body::-webkit-scrollbar,
+	.panel-dropdown-list::-webkit-scrollbar {
+		width: 10px;
+		height: 10px;
+	}
+	.sidebar-body::-webkit-scrollbar-track,
+	.panel-dropdown-list::-webkit-scrollbar-track {
+		background: transparent;
+	}
+	.sidebar-body::-webkit-scrollbar-thumb,
+	.panel-dropdown-list::-webkit-scrollbar-thumb {
+		background: color-mix(in srgb, var(--track-dark) 75%, transparent);
+		border-radius: 999px;
+		border: 2px solid transparent;
+		background-clip: padding-box;
+	}
+	.sidebar-body::-webkit-scrollbar-thumb:hover,
+	.panel-dropdown-list::-webkit-scrollbar-thumb:hover {
+		background: color-mix(in srgb, var(--track-light) 65%, transparent);
+		border: 2px solid transparent;
+		background-clip: padding-box;
 	}
 	.panel-dropdown-option {
 		display: block;
@@ -618,9 +654,15 @@
 	@media (max-width: 767px) {
 		.sidebar {
 			width: 100%;
-			max-height: 40vh;
+			flex: 0 0 auto;
+			max-height: clamp(180px, 32dvh, 280px);
+			min-height: 0;
 			border-left: none;
 			border-top: 1px solid var(--border-subtle);
+		}
+		.sidebar-body {
+			padding: 14px;
+			gap: 14px;
 		}
 	}
 </style>

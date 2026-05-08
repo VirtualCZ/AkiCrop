@@ -80,3 +80,9 @@ html, body {
 	color: var(--text-secondary);
 	border: 1px solid var(--border-subtle);
 }
+
+@media (max-width: 767px) {
+	:root {
+		--zoombar-height: 34px;
+	}
+}

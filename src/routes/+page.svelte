@@ -13,6 +13,7 @@
 		CAROUSEL_STRIP_GAP,
 		ASPECT_POPUP_ROWS,
 		ASPECT_POPUP_THUMB_SIZE,
+		EXPORT_RESOLUTION_PRESETS,
 		type AppMode
 	} from '$lib/constants';
 	import { Topbar, ExportPreview, AspectRatioPopup, NarrowImageWarning, StackView, CarouselView, CropView, Sidebar } from '$lib/components';
@@ -50,6 +51,12 @@
 	let exportPreviewPanels = $state<{ url: string; blob: Blob }[]>([]);
 	/** Set when opening preview so filenames use akicrop-stack-N vs akicrop-panel-N */
 	let exportPreviewKind = $state<'carousel' | 'stack' | null>(null);
+	/** Format used for current preview panels (for correct file extension on download/share). */
+	let exportPreviewFormat = $state<'image/png' | 'image/jpeg'>('image/png');
+	/** True while regenerating panels inside the export dialog (no full-page spinner). */
+	let exportPreviewRegenerating = $state(false);
+	/** Incremented when options change; only the latest regeneration applies. */
+	let exportRegenerationVersion = $state(0);
 
 	// Aspect ratio popup (after add image or "More ratios…")
 	let aspectRatioPopupOpen = $state(false);
@@ -59,6 +66,17 @@
 	let aspectPopupFocusOnce = $state(false);
 	// Fill = cover (zoom to fill), Fit = contain (letterbox). Shared by Crop, popup previews, Carousel, Stack.
 	let fillMode = $state<'contain' | 'cover'>('contain');
+
+	// Export options: format, quality (for JPEG), resolution (max longest side; null = original)
+	let exportFormat = $state<'image/png' | 'image/jpeg'>('image/png');
+	let exportQuality = $state(0.92);
+	let exportResolutionId = $state('original');
+	const exportMaxSize = $derived.by(() => {
+		const preset = EXPORT_RESOLUTION_PRESETS.find((p) => p.id === exportResolutionId);
+		return preset?.maxSize ?? null;
+	});
+	const exportFileExt = $derived(exportFormat === 'image/jpeg' ? 'jpg' : 'png');
+	const exportMimeType = $derived(exportFormat);
 
 	const canUseShare = $derived(
 		typeof navigator !== 'undefined' && typeof navigator.share === 'function'
@@ -337,46 +355,120 @@
 		e.preventDefault();
 	}
 
+	async function generateStackPanels(): Promise<{ url: string; blob: Blob }[]> {
+		if (!stackImages.length) return [];
+		const cellWidth = EXPORT_STACK_WIDTH;
+		const firstPreviewDims = getCanvasDimensions(
+			stackImages[0].preview.width,
+			stackImages[0].preview.height,
+			stackTemplateRatio,
+			STACK_PREVIEW_MAX
+		);
+		const scale = firstPreviewDims.width > 0 ? cellWidth / firstPreviewDims.width : 1;
+		const exportPadding = Math.round(padding * scale);
+		const mime = exportFormat === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+		const quality = exportFormat === 'image/jpeg' ? exportQuality : 1;
+		const panels: { url: string; blob: Blob }[] = [];
+		for (const item of stackImages) {
+			const bitmap = await createImageBitmap(item.blob);
+			const r = stackTemplateRatio > 0 ? stackTemplateRatio : bitmap.width / bitmap.height;
+			const w = cellWidth;
+			const h = Math.round(cellWidth / r);
+			const c = document.createElement('canvas');
+			c.width = w;
+			c.height = h;
+			renderCanvas(c, {
+				image: bitmap,
+				templateRatio: r,
+				padding: exportPadding,
+				borderType,
+				blurStrength,
+				solidColor,
+				width: w,
+				height: h,
+				fillMode
+			});
+			bitmap.close();
+			const blob = await new Promise<Blob | null>((res) => c.toBlob(res, mime, quality));
+			if (blob) panels.push({ url: URL.createObjectURL(blob), blob });
+		}
+		return panels;
+	}
+
+	async function generateCarouselPanels(): Promise<{ url: string; blob: Blob }[]> {
+		if (!carouselOriginalBlob || !carouselImage || carouselPanelCount < 1) return [];
+		const bitmap = await createImageBitmap(carouselOriginalBlob);
+		const w = bitmap.width;
+		const h = bitmap.height;
+		const n = carouselPanelCount;
+		const zoomFactor = carouselZoom / 100;
+		const viewWidth = zoomFactor <= 1 ? w : Math.max(0.001, w / zoomFactor);
+		const viewLeft = zoomFactor <= 1 ? 0 : (w - viewWidth) / 2;
+		const sliceW = viewWidth / n;
+		const panels: { url: string; blob: Blob }[] = [];
+		const panelRatio = carouselTemplateRatio;
+		const exportDims = getCanvasDimensions(sliceW, h, panelRatio, exportMaxSize ?? undefined);
+		const scale = exportDims.width / carouselPanelDims.width;
+		const exportPadding = Math.round(padding * scale);
+		const mime = exportFormat === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+		const quality = exportFormat === 'image/jpeg' ? exportQuality : 1;
+		for (let i = 0; i < n; i++) {
+			const sx = viewLeft + i * sliceW;
+			const sliceAspect = sliceW / h;
+			const fillMode = sliceAspect >= panelRatio ? 'contain' : 'cover';
+			const c = document.createElement('canvas');
+			c.width = exportDims.width;
+			c.height = exportDims.height;
+			renderCanvas(c, {
+				image: bitmap,
+				templateRatio: panelRatio,
+				padding: exportPadding,
+				borderType,
+				blurStrength,
+				solidColor,
+				width: exportDims.width,
+				height: exportDims.height,
+				sourceRect: { sx, sy: 0, sw: sliceW, sh: h },
+				fillMode,
+				zoom: 1
+			});
+			const blob = await new Promise<Blob | null>((res) => c.toBlob(res, mime, quality));
+			if (blob) panels.push({ url: URL.createObjectURL(blob), blob });
+		}
+		bitmap.close();
+		return panels;
+	}
+
+	async function regenerateExportPanels() {
+		if (exportPreviewKind !== 'stack' && exportPreviewKind !== 'carousel') return;
+		exportPreviewPanels.forEach((p) => URL.revokeObjectURL(p.url));
+		exportPreviewRegenerating = true;
+		const version = ++exportRegenerationVersion;
+		try {
+			const panels =
+				exportPreviewKind === 'stack' ? await generateStackPanels() : await generateCarouselPanels();
+			if (version !== exportRegenerationVersion) {
+				panels.forEach((p) => URL.revokeObjectURL(p.url));
+				return;
+			}
+			exportPreviewPanels = panels;
+			exportPreviewFormat = exportFormat;
+		} catch (e) {
+			if (version === exportRegenerationVersion) console.error('Regenerate export failed:', e);
+		} finally {
+			if (version === exportRegenerationVersion) exportPreviewRegenerating = false;
+		}
+	}
+
 	async function download() {
 		if (appMode === 'stack') {
 			if (!stackImages.length) return;
 			exportLoading = true;
 			try {
-				const cellWidth = EXPORT_STACK_WIDTH;
-				const firstPreviewDims = getCanvasDimensions(
-					stackImages[0].preview.width,
-					stackImages[0].preview.height,
-					stackTemplateRatio,
-					STACK_PREVIEW_MAX
-				);
-				const scale = firstPreviewDims.width > 0 ? cellWidth / firstPreviewDims.width : 1;
-				const exportPadding = Math.round(padding * scale);
-				const panels: { url: string; blob: Blob }[] = [];
-				for (const item of stackImages) {
-					const bitmap = await createImageBitmap(item.blob);
-					const r = stackTemplateRatio > 0 ? stackTemplateRatio : bitmap.width / bitmap.height;
-					const w = cellWidth;
-					const h = Math.round(cellWidth / r);
-					const c = document.createElement('canvas');
-					c.width = w;
-					c.height = h;
-					renderCanvas(c, {
-						image: bitmap,
-						templateRatio: r,
-						padding: exportPadding,
-						borderType,
-						blurStrength,
-						solidColor,
-						width: w,
-						height: h,
-						fillMode
-					});
-					bitmap.close();
-					const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png', 1));
-					if (blob) panels.push({ url: URL.createObjectURL(blob), blob });
-				}
+				const panels = await generateStackPanels();
 				exportPreviewKind = 'stack';
 				exportPreviewPanels = panels;
+				exportPreviewFormat = exportFormat;
 				exportPreviewOpen = true;
 			} catch (e) {
 				console.error('Stack export failed:', e);
@@ -388,47 +480,10 @@
 			if (!carouselOriginalBlob || !carouselImage || carouselPanelCount < 1) return;
 			exportLoading = true;
 			try {
-				const bitmap = await createImageBitmap(carouselOriginalBlob);
-				const w = bitmap.width;
-				const h = bitmap.height;
-				const n = carouselPanelCount;
-				const zoomFactor = carouselZoom / 100;
-				const viewWidth = zoomFactor <= 1 ? w : Math.max(0.001, w / zoomFactor);
-				const viewLeft = zoomFactor <= 1 ? 0 : (w - viewWidth) / 2;
-				const sliceW = viewWidth / n;
-				const panels: { url: string; blob: Blob }[] = [];
-				const panelRatio = carouselTemplateRatio;
-				const exportDims = getCanvasDimensions(sliceW, h, panelRatio, undefined);
-				const scale = exportDims.width / carouselPanelDims.width;
-				const exportPadding = Math.round(padding * scale);
-				for (let i = 0; i < n; i++) {
-					const sx = viewLeft + i * sliceW;
-					const sliceAspect = sliceW / h;
-					const fillMode = sliceAspect >= panelRatio ? 'contain' : 'cover';
-					const c = document.createElement('canvas');
-					c.width = exportDims.width;
-					c.height = exportDims.height;
-					renderCanvas(c, {
-						image: bitmap,
-						templateRatio: panelRatio,
-						padding: exportPadding,
-						borderType,
-						blurStrength,
-						solidColor,
-						width: exportDims.width,
-						height: exportDims.height,
-						sourceRect: { sx, sy: 0, sw: sliceW, sh: h },
-						fillMode,
-						zoom: 1
-					});
-					const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png', 1));
-					if (blob) {
-						panels.push({ url: URL.createObjectURL(blob), blob });
-					}
-				}
-				bitmap.close();
+				const panels = await generateCarouselPanels();
 				exportPreviewKind = 'carousel';
 				exportPreviewPanels = panels;
+				exportPreviewFormat = exportFormat;
 				exportPreviewOpen = true;
 			} catch (e) {
 				console.error('Carousel export failed:', e);
@@ -446,7 +501,7 @@
 				bitmap.width,
 				bitmap.height,
 				ratio,
-				undefined
+				exportMaxSize ?? undefined
 			);
 			const scale = dims.width / previewDims.width;
 			const exportPadding = Math.round(padding * scale);
@@ -470,8 +525,8 @@
 						exportLoading = false;
 						return;
 					}
-					const filename = `akicrop-${Date.now()}.png`;
-					const file = new File([blob], filename, { type: 'image/png' });
+					const filename = `akicrop-${Date.now()}.${exportFileExt}`;
+					const file = new File([blob], filename, { type: exportMimeType });
 					if (typeof navigator !== 'undefined' && navigator.share && navigator.canShare?.({ files: [file] })) {
 						navigator.share({ files: [file], title: 'AkiCrop', text: 'Exported image' })
 							.then(() => { exportLoading = false; })
@@ -484,8 +539,8 @@
 					triggerDownloadFallback(blob, filename);
 					exportLoading = false;
 				},
-				'image/png',
-				1
+				exportMimeType,
+				exportFormat === 'image/jpeg' ? exportQuality : 1
 			);
 		} catch (e) {
 			exportLoading = false;
@@ -502,16 +557,19 @@
 
 	function downloadExportPreviewPanels() {
 		const prefix = exportPreviewKind === 'stack' ? 'akicrop-stack' : 'akicrop-panel';
+		const ext = exportPreviewFormat === 'image/jpeg' ? 'jpg' : 'png';
 		const delay = 300;
 		exportPreviewPanels.forEach((p, i) => {
-			setTimeout(() => triggerDownloadFallback(p.blob, `${prefix}-${i + 1}.png`), i * delay);
+			setTimeout(() => triggerDownloadFallback(p.blob, `${prefix}-${i + 1}.${ext}`), i * delay);
 		});
 	}
 
 	async function shareExportPreviewPanels() {
 		const prefix = exportPreviewKind === 'stack' ? 'akicrop-stack' : 'akicrop-panel';
+		const ext = exportPreviewFormat === 'image/jpeg' ? 'jpg' : 'png';
+		const mime = exportPreviewFormat;
 		const files = exportPreviewPanels.map(
-			(p, i) => new File([p.blob], `${prefix}-${i + 1}.png`, { type: 'image/png' })
+			(p, i) => new File([p.blob], `${prefix}-${i + 1}.${ext}`, { type: mime })
 		);
 		try {
 			if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
@@ -528,7 +586,8 @@
 	async function shareExportPreviewPanel(panel: { url: string; blob: Blob }, index: number) {
 		try {
 			if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') return;
-			const file = new File([panel.blob], `akicrop-panel-${index + 1}.png`, { type: 'image/png' });
+			const ext = exportPreviewFormat === 'image/jpeg' ? 'jpg' : 'png';
+			const file = new File([panel.blob], `akicrop-panel-${index + 1}.${ext}`, { type: exportPreviewFormat });
 			await navigator.share({ files: [file] });
 		} catch (e) {
 			if ((e as Error).name !== 'AbortError') alert('Share failed: ' + ((e as Error).message || String(e)));
@@ -873,13 +932,26 @@
 
 	<ExportPreview
 		open={exportPreviewOpen}
+		kind={exportPreviewKind}
 		panels={exportPreviewPanels}
 		canUseShare={canUseShare}
+		exportFormat={exportFormat}
+		onSetExportFormat={(f) => (exportFormat = f)}
+		bind:exportQuality
+		exportResolutionId={exportResolutionId}
+		onSetExportResolutionId={(id) => (exportResolutionId = id)}
+		resolutionPresets={EXPORT_RESOLUTION_PRESETS}
+		onExportOptionsChange={regenerateExportPanels}
+		regenerating={exportPreviewRegenerating}
 		onClose={closeExportPreview}
 		onShareAll={shareExportPreviewPanels}
 		onDownloadAll={downloadExportPreviewPanels}
 		onSharePanel={shareExportPreviewPanel}
-		onDownloadPanel={(panel, i) => triggerDownloadFallback(panel.blob, `${exportPreviewKind === 'stack' ? 'akicrop-stack' : 'akicrop-panel'}-${i + 1}.png`)}
+		onDownloadPanel={(panel, i) => {
+			const prefix = exportPreviewKind === 'stack' ? 'akicrop-stack' : 'akicrop-panel';
+			const ext = exportPreviewFormat === 'image/jpeg' ? 'jpg' : 'png';
+			triggerDownloadFallback(panel.blob, `${prefix}-${i + 1}.${ext}`);
+		}}
 	/>
 
 	<AspectRatioPopup

@@ -210,8 +210,10 @@
 			if (t < 1) zoomReturnRaf = requestAnimationFrame(tick);
 			else {
 				zoom = targetZoom;
-				panX = 0;
-				panY = 0;
+				if (fitMode) {
+					panX = 0;
+					panY = 0;
+				}
 				zoomReturnRaf = 0;
 				zoomReturning = false;
 			}

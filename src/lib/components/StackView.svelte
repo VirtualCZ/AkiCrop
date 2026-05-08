@@ -54,6 +54,9 @@
 	let stackSwipeCanvasRight = $state<HTMLCanvasElement | null>(null);
 	let stackSwipeDragOffset = $state(0);
 	let stackSwipePointerStart = $state<{ x: number; startOffset: number } | null>(null);
+	let stackZoomHudVisible = $state(false);
+	let stackZoomHudInitialized = false;
+	let stackZoomHudTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	const stackStoryCurrentItem = $derived(
 		stackImages.length > 0 ? stackImages[stackStoryIndex] ?? stackImages[0] : null
@@ -140,6 +143,25 @@
 		const n = stackImages.length;
 		if (n === 0) return;
 		if (stackStoryIndex >= n) stackStoryIndex = n - 1;
+	});
+	$effect(() => {
+		stackZoom;
+		if (!stackZoomHudInitialized) {
+			stackZoomHudInitialized = true;
+			return;
+		}
+		stackZoomHudVisible = true;
+		if (stackZoomHudTimeout) clearTimeout(stackZoomHudTimeout);
+		stackZoomHudTimeout = setTimeout(() => {
+			stackZoomHudVisible = false;
+			stackZoomHudTimeout = null;
+		}, 700);
+		return () => {
+			if (stackZoomHudTimeout) {
+				clearTimeout(stackZoomHudTimeout);
+				stackZoomHudTimeout = null;
+			}
+		};
 	});
 
 	function renderStackSwipePanel(
@@ -364,22 +386,31 @@
 
 {#if stackImages.length}
 	<footer class="zoom-bar">
-		<button type="button" class="zoom-btn" class:selected={stackViewMode === 'list'} onclick={() => (stackViewMode = 'list')} title="List view">List</button>
-		<button type="button" class="zoom-btn" class:selected={stackViewMode === 'story'} onclick={() => (stackViewMode = 'story')} title="One at a time (drag to switch)">Swipe</button>
-		<label class="zoom-btn">
-			<input type="file" accept="image/*" multiple onchange={onStackFiles} />
-			Add image
-		</label>
-		<button type="button" class="zoom-btn" onclick={clearStack}>Clear all</button>
+		<div class="zoom-group">
+			<button type="button" class="zoom-btn" class:selected={stackViewMode === 'list'} onclick={() => (stackViewMode = 'list')} title="List view">List</button>
+			<button type="button" class="zoom-btn" class:selected={stackViewMode === 'story'} onclick={() => (stackViewMode = 'story')} title="One at a time (drag to switch)">Swipe</button>
+		</div>
+		<div class="zoom-group">
+			<label class="zoom-btn">
+				<input type="file" accept="image/*" multiple onchange={onStackFiles} />
+				Add
+			</label>
+			<button type="button" class="zoom-btn" onclick={clearStack}>Clear</button>
+		</div>
 		{#if stackViewMode === 'list'}
-			<button type="button" class="zoom-btn" onclick={stackZoomOut} title="Zoom out">−</button>
-			<button type="button" class="zoom-btn" class:selected={stackZoom === 1} onclick={stackZoomReset} title="100%">100%</button>
-			<span class="zoom-pct">{Math.round(stackZoom * 100)}%</span>
-			<button type="button" class="zoom-btn" onclick={stackZoomIn} title="Zoom in">+</button>
-		{:else}
-			<span class="zoom-pct stack-story-pct">{stackStoryIndex + 1} / {stackImages.length}</span>
+			<div class="zoom-group zoom-group-zoom">
+				<button type="button" class="zoom-btn" onclick={stackZoomOut} title="Zoom out">−</button>
+				<button type="button" class="zoom-btn" class:selected={stackZoom === 1} onclick={stackZoomReset} title="100%">100%</button>
+				<span class="zoom-pct">{Math.round(stackZoom * 100)}%</span>
+				<button type="button" class="zoom-btn" onclick={stackZoomIn} title="Zoom in">+</button>
+			</div>
 		{/if}
 	</footer>
+{/if}
+{#if stackImages.length && stackViewMode === 'list'}
+	<div class="stack-zoom-hud" class:visible={stackZoomHudVisible} aria-hidden="true">
+		{Math.round(stackZoom * 100)}%
+	</div>
 {/if}
 
 <style>
@@ -510,9 +541,6 @@
 		min-width: 3em;
 		text-align: center;
 	}
-	.stack-story-pct {
-		min-width: 3em;
-	}
 	.stack-scroll {
 		flex: 1;
 		min-height: 0;
@@ -589,12 +617,21 @@
 		flex-shrink: 0;
 		display: flex;
 		align-items: center;
-		justify-content: center;
+		justify-content: space-between;
 		gap: 8px;
-		padding: 0 12px;
+		padding: 0 8px;
 		box-sizing: border-box;
 		background: var(--bg-panel);
 		border-top: 1px solid var(--border-subtle);
+	}
+	.zoom-group {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		flex-shrink: 0;
+	}
+	.zoom-group-zoom {
+		margin-left: auto;
 	}
 	.zoom-bar label.zoom-btn {
 		display: inline-flex;
@@ -635,5 +672,42 @@
 		text-align: center;
 		font-size: var(--font-size-label);
 		color: var(--text-secondary);
+	}
+	.stack-zoom-hud {
+		position: absolute;
+		left: 50%;
+		bottom: calc(var(--zoombar-height) + 10px);
+		transform: translateX(-50%) translateY(6px);
+		padding: 6px 10px;
+		border-radius: 999px;
+		background: rgba(0, 0, 0, 0.65);
+		color: var(--text-primary);
+		font-size: var(--font-size-label);
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity 0.15s ease, transform 0.15s ease;
+		z-index: 15;
+	}
+	.stack-zoom-hud.visible {
+		opacity: 1;
+		transform: translateX(-50%) translateY(0);
+	}
+	@media (max-width: 767px) {
+		.zoom-bar {
+			height: 36px;
+			gap: 6px;
+			padding: 0 6px;
+			justify-content: space-between;
+		}
+		.zoom-group-zoom {
+			display: none;
+		}
+		.zoom-bar .zoom-btn {
+			min-width: 0;
+			padding: 0 10px;
+		}
+		.stack-zoom-hud {
+			display: block;
+		}
 	}
 </style>

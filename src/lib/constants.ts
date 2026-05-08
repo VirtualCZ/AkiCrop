@@ -20,6 +20,14 @@ export const ASPECT_POPUP_THUMB_SIZE = 80;
 export const MAX_ZOOM = 3;
 export const ZOOM_RETURN_DURATION = 220;
 
+/** Export resolution: max length of longest side in pixels; null = original size. */
+export const EXPORT_RESOLUTION_PRESETS: { id: string; label: string; maxSize: number | null }[] = [
+	{ id: 'original', label: 'Original', maxSize: null },
+	{ id: '1080', label: '1080p (1920)', maxSize: 1920 },
+	{ id: '2k', label: '2K (2048)', maxSize: 2048 },
+	{ id: '4k', label: '4K (4096)', maxSize: 4096 }
+];
+
 /** Grouped rows for the aspect-ratio popup. */
 export const ASPECT_POPUP_ROWS: { label: string; ids: TemplateId[] }[] = [
 	{ label: 'Instagram', ids: INSTAGRAM_PRESETS },
